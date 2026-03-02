@@ -429,6 +429,14 @@ function App() {
 
       {error && <div className="error">{error}</div>}
 
+      {/* Show message if no results found */}
+      {!loading && !error && tags.length > 0 && recs.length === 0 && (
+        <div className="no-results">
+          <p>😔 No artists found matching your criteria.</p>
+          <p>Try increasing the max followers limit or adjusting your search.</p>
+        </div>
+      )}
+
       {loading && (
         <div className="loading-container">
           <div className="loading-bar"></div>
@@ -479,10 +487,13 @@ function App() {
             />
             <div className="artist-info">
               <div className="artist-header">
-                <h3 className="artist-name">{r.artist}</h3>
+                <h3 className="artist-name">
+                  {r.artist}
+                  {r.verified && <span className="verified-badge" title="Verified on Spotify">✓</span>}
+                </h3>
                 <div className="artist-meta">
                   {r.followers !== null && r.followers !== undefined && (
-                    <span className="follower-count" title={`${r.followers?.toLocaleString()} followers`}>
+                    <span className="follower-count" title={`${r.followers?.toLocaleString()} followers on Spotify`}>
                       👥 {formatFollowers(r.followers)}
                     </span>
                   )}
@@ -521,6 +532,28 @@ function App() {
               {r.obscurityScore !== null && r.obscurityScore !== undefined && (
                 <div className="obscurity-badge">
                   Obscurity Score: {r.obscurityScore}/100
+                </div>
+              )}
+
+              {/* Follower source breakdown */}
+              {r.followerSources && (r.followerSources.spotify || r.followerSources.youtube || r.followerSources.lastfm) && (
+                <div className="follower-sources">
+                  <span className="sources-label">Data sources:</span>
+                  {r.followerSources.spotify && (
+                    <span className="source-item spotify">
+                      Spotify: {formatFollowers(r.followerSources.spotify)}
+                    </span>
+                  )}
+                  {r.followerSources.youtube && (
+                    <span className="source-item youtube">
+                      YouTube: {formatFollowers(r.followerSources.youtube)}
+                    </span>
+                  )}
+                  {r.followerSources.lastfm && (
+                    <span className="source-item lastfm">
+                      Last.fm: {formatFollowers(r.followerSources.lastfm)}
+                    </span>
+                  )}
                 </div>
               )}
 
