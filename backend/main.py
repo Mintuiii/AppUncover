@@ -95,20 +95,20 @@ def get_spotify_client_token():
         pass
     return None
 
-def get_spotify_followers(artist_name: str, user_token: Optional[str] = None) -> tuple[Optional[int], Optional[str], Optional[str]]:
+def get_spotify_followers(artist_name: str, user_token: Optional[str] = None) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
     """
-    Get follower count, Spotify URI, and embed URL from Spotify API
-    Returns: (follower_count, spotify_uri, embed_url)
+    Get follower count, Spotify URI, embed URL, and verified artist name from Spotify API
+    Returns: (follower_count, spotify_uri, embed_url, verified_name)
     """
     token = user_token or _spotify_client_token or get_spotify_client_token()
     if not token:
-        return None, None, None
+        return None, None, None, None
     
     try:
         r = requests.get(
             "https://api.spotify.com/v1/search",
             headers={"Authorization": f"Bearer {token}"},
-            params={"q": artist_name, "type": "artist", "limit": 1},
+            params={"q": artist_name, "type": "artist", "limit": 5},  # Get top 5 for better matching
             timeout=8
         )
         
@@ -116,15 +116,36 @@ def get_spotify_followers(artist_name: str, user_token: Optional[str] = None) ->
             data = r.json()
             artists = data.get("artists", {}).get("items", [])
             if artists:
-                artist = artists[0]
-                followers = artist.get("followers", {}).get("total", 0)
-                artist_id = artist.get("id")
-                spotify_uri = artist.get("uri")
+                # Try to find exact or best match
+                best_match = None
+                exact_match = None
+                
+                for artist in artists:
+                    artist_spotify_name = artist.get("name", "").lower()
+                    search_name = artist_name.lower()
+                    
+                    # Exact match (case insensitive)
+                    if artist_spotify_name == search_name:
+                        exact_match = artist
+                        break
+                    
+                    # Best match (contains or very similar)
+                    if not best_match or artist_spotify_name.startswith(search_name):
+                        best_match = artist
+                
+                # Use exact match if found, otherwise best match, otherwise first result
+                selected_artist = exact_match or best_match or artists[0]
+                
+                followers = selected_artist.get("followers", {}).get("total", 0)
+                artist_id = selected_artist.get("id")
+                spotify_uri = selected_artist.get("uri")
+                verified_name = selected_artist.get("name")
                 embed_url = f"https://open.spotify.com/embed/artist/{artist_id}" if artist_id else None
-                return followers, spotify_uri, embed_url
-    except Exception:
-        pass
-    return None, None, None
+                
+                return followers, spotify_uri, embed_url, verified_name
+    except Exception as e:
+        print(f"Spotify API error for {artist_name}: {e}")
+    return None, None, None, None
 
 def get_spotify_top_tracks(artist_id: str, user_token: Optional[str] = None, market: str = "US") -> List[Dict[str, Any]]:
     """Get artist's top tracks from Spotify"""
@@ -289,9 +310,9 @@ def get_lastfm_listeners(artist_name: str) -> Optional[int]:
 def get_artist_followers(artist_name: str, user_token: Optional[str] = None) -> Dict[str, Any]:
     """
     Get follower/subscriber counts and URLs from multiple sources
-    Returns dict with counts and URLs from each source
+    Returns dict with counts, URLs, and verified name from each source
     """
-    spotify_followers, spotify_uri, spotify_embed = get_spotify_followers(artist_name, user_token)
+    spotify_followers, spotify_uri, spotify_embed, spotify_verified_name = get_spotify_followers(artist_name, user_token)
     youtube_subs, youtube_url = get_youtube_subscribers(artist_name)
     lastfm = get_lastfm_listeners(artist_name)
     
@@ -299,6 +320,7 @@ def get_artist_followers(artist_name: str, user_token: Optional[str] = None) -> 
         "spotify": spotify_followers,
         "spotify_uri": spotify_uri,
         "spotify_embed": spotify_embed,
+        "spotify_verified_name": spotify_verified_name,
         "youtube": youtube_subs,
         "youtube_url": youtube_url,
         "lastfm": lastfm
@@ -401,21 +423,26 @@ def ai_recommend(artists: List[str], obscurity_level: ObscurityLevel) -> Dict[st
     prompt = f"""
     The user is interested in these artists, genres, or vibes: {artist_list}.
     
-    CRITICAL: Recommend ONLY {level_info['prompt_modifier']}.
-    Maximum follower count target: {level_info['max_followers']:,}
+    CRITICAL INSTRUCTIONS:
+    - Recommend ONLY {level_info['prompt_modifier']}.
+    - Maximum follower count target: {level_info['max_followers']:,} on Spotify
+    - Artists must be REAL and VERIFIABLE on Spotify, Apple Music, or other major platforms
+    - AVOID completely unknown/fictional artists
+    - Use the artist's exact official name as it appears on Spotify
     
     1) Return 5–8 descriptive global tags (genres, moods, themes, style) for this specific taste.
-    2) Recommend 8 {level_info['description']} that fit this specific vibe.
+    2) Recommend 10-12 {level_info['description']} that fit this specific vibe.
        - AVOID any mainstream or well-known artists
        - Focus on {level_info['prompt_modifier']}
        - Prioritize artists with very small followings
+       - Artists should be real and verifiable
     3) For each artist, give one-sentence why it fits AND 3 specific tags for that artist.
 
     Respond as strict JSON:
     {{
       "tags": ["tag1", "..."],
       "recommendations": [
-        {{"artist": "Name", "explanation": "one sentence", "tags": ["tag1", "tag2", "tag3"]}}
+        {{"artist": "Exact Artist Name", "explanation": "one sentence", "tags": ["tag1", "tag2", "tag3"]}}
       ]
     }}
     """
@@ -480,6 +507,8 @@ def fallback_lastfm_image(artist_name: str) -> str | None:
 
 def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_token: Optional[str] = None) -> List[Dict[str, Any]]:
     enriched = []
+    skipped_artists = []  # Track artists that were filtered out
+    
     for r in recs:
         name = r.get("artist", "")
         
@@ -487,8 +516,22 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
         counts = get_artist_followers(name, user_token)
         follower_count = get_best_follower_count(counts)
         
-        # Skip if over the limit
+        # Use Spotify verified name if available, otherwise use AI suggested name
+        verified_name = counts.get("spotify_verified_name") or name
+        
+        # Skip if over the limit (with some logging)
         if follower_count and follower_count > max_followers:
+            skipped_artists.append({
+                "ai_name": name,
+                "verified_name": verified_name,
+                "followers": follower_count
+            })
+            print(f"Filtered out: {name} (verified as {verified_name}) with {follower_count:,} followers (max: {max_followers:,})")
+            continue
+        
+        # Skip if artist not found on any platform
+        if not follower_count and not counts.get("spotify_uri"):
+            print(f"Warning: Could not verify artist '{name}' on any platform")
             continue
         
         # Get top tracks if we have Spotify data
@@ -498,13 +541,13 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
             if artist_id:
                 top_tracks = get_spotify_top_tracks(artist_id, user_token)
         
-        meta = enrich_with_itunes(name)
+        meta = enrich_with_itunes(verified_name)
         if not meta.get("image"):
-            lf_img = fallback_lastfm_image(name)
+            lf_img = fallback_lastfm_image(verified_name)
             if lf_img:
                 meta["image"] = lf_img
         
-        encoded_name = urllib.parse.quote_plus(name)
+        encoded_name = urllib.parse.quote_plus(verified_name)
         
         # Determine which link to use: Last.fm or YouTube
         if LASTFM_KEY:
@@ -518,7 +561,8 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
             primary_url_label = "YouTube"
 
         enriched.append({
-            "artist": name,
+            "artist": verified_name,  # Use verified name from Spotify
+            "ai_suggested_name": name,  # Keep original AI suggestion for reference
             "explanation": r.get("explanation", ""),
             "tags": r.get("tags", []),
             "image": meta.get("image"),
@@ -531,12 +575,25 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
             "spotifyUri": counts.get("spotify_uri"),
             "topTracks": top_tracks,
             "followers": follower_count,
-            "followerSources": counts,
-            "obscurityScore": calculate_obscurity_score(follower_count) if follower_count else None
+            "followerSources": {
+                "spotify": counts.get("spotify"),
+                "youtube": counts.get("youtube"),
+                "lastfm": counts.get("lastfm")
+            },
+            "obscurityScore": calculate_obscurity_score(follower_count) if follower_count else None,
+            "verified": bool(counts.get("spotify_uri"))  # Flag if we found them on Spotify
         })
     
     # Sort by obscurity (fewer followers first)
     enriched.sort(key=lambda x: x.get("followers") or 0)
+    
+    # Log summary
+    print(f"\n=== Filtering Summary ===")
+    print(f"Total AI recommendations: {len(recs)}")
+    print(f"Passed filter: {len(enriched)}")
+    print(f"Filtered out (too popular): {len(skipped_artists)}")
+    print(f"Returning top {min(5, len(enriched))} artists")
+    
     return enriched[:5]
 
 def calculate_obscurity_score(followers: int) -> int:
