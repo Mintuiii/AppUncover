@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
+import importlib
 import os, json, requests, urllib.parse
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
@@ -11,8 +11,8 @@ import secrets
 load_dotenv()
 
 # --- Configure Gemini ---
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 GEMINI_MODEL = "models/gemini-2.5-flash"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- API Keys ---
 LASTFM_KEY = os.getenv("LASTFM_API_KEY")
@@ -70,6 +70,13 @@ class ArtistInput(BaseModel):
     artists: List[str]
     obscurity_level: Optional[ObscurityLevel] = ObscurityLevel.DEEP_CUT
     spotify_token: Optional[str] = None
+    spotify_hints: Optional[List[Dict[str, Any]]] = None
+
+
+class SavePlaylistInput(BaseModel):
+    token: str
+    artist_ids: List[str]
+    name: str
 
 # --- Spotify Token Cache & User Tokens ---
 _spotify_client_token = None
@@ -95,57 +102,65 @@ def get_spotify_client_token():
         pass
     return None
 
-def get_spotify_followers(artist_name: str, user_token: Optional[str] = None) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
+def get_spotify_followers(artist_name: str, user_token: Optional[str] = None, spotify_id: Optional[str] = None) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str], Optional[List[str]]]:
     """
-    Get follower count, Spotify URI, embed URL, and verified artist name from Spotify API
-    Returns: (follower_count, spotify_uri, embed_url, verified_name)
+    Get follower count, Spotify URI, embed URL, verified artist name and genres from Spotify API.
+    Returns: (follower_count, spotify_uri, embed_url, verified_name, genres)
     """
     token = user_token or _spotify_client_token or get_spotify_client_token()
     if not token:
-        return None, None, None, None
-    
+        return None, None, None, None, None
+
     try:
-        r = requests.get(
-            "https://api.spotify.com/v1/search",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"q": artist_name, "type": "artist", "limit": 5},  # Get top 5 for better matching
-            timeout=8
-        )
-        
-        if r.ok:
-            data = r.json()
-            artists = data.get("artists", {}).get("items", [])
-            if artists:
-                # Try to find exact or best match
-                best_match = None
-                exact_match = None
-                
-                for artist in artists:
-                    artist_spotify_name = artist.get("name", "").lower()
-                    search_name = artist_name.lower()
-                    
-                    # Exact match (case insensitive)
-                    if artist_spotify_name == search_name:
-                        exact_match = artist
-                        break
-                    
-                    # Best match (contains or very similar)
-                    if not best_match or artist_spotify_name.startswith(search_name):
-                        best_match = artist
-                
-                # Use exact match if found, otherwise best match, otherwise first result
-                selected_artist = exact_match or best_match or artists[0]
-                
-                followers = selected_artist.get("followers", {}).get("total", 0)
-                artist_id = selected_artist.get("id")
-                spotify_uri = selected_artist.get("uri")
-                verified_name = selected_artist.get("name")
-                embed_url = f"https://open.spotify.com/embed/artist/{artist_id}" if artist_id else None
-                
-                return followers, spotify_uri, embed_url, verified_name
+        selected_artist = None
+
+        if spotify_id:
+            by_id = requests.get(
+                f"https://api.spotify.com/v1/artists/{spotify_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=8,
+            )
+            if by_id.ok:
+                selected_artist = by_id.json()
+
+        if not selected_artist:
+            r = requests.get(
+                "https://api.spotify.com/v1/search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": artist_name, "type": "artist", "limit": 5},
+                timeout=8
+            )
+
+            if not r.ok:
+                return None, None, None, None, None
+
+            artists = r.json().get("artists", {}).get("items", [])
+            if not artists:
+                return None, None, None, None, None
+
+            best_match = None
+            exact_match = None
+            for artist in artists:
+                artist_spotify_name = artist.get("name", "").lower()
+                search_name = artist_name.lower()
+                if artist_spotify_name == search_name:
+                    exact_match = artist
+                    break
+                if not best_match or artist_spotify_name.startswith(search_name):
+                    best_match = artist
+            selected_artist = exact_match or best_match or artists[0]
+
+        followers = selected_artist.get("followers", {}).get("total", 0)
+        artist_id = selected_artist.get("id")
+        spotify_uri = selected_artist.get("uri")
+        verified_name = selected_artist.get("name")
+        genres = selected_artist.get("genres", [])
+        embed_url = f"https://open.spotify.com/embed/artist/{artist_id}" if artist_id else None
+
+        return followers, spotify_uri, embed_url, verified_name, genres
     except Exception as e:
         print(f"Spotify API error for {artist_name}: {e}")
-    return None, None, None, None
+    return None, None, None, None, None
 
 def get_spotify_top_tracks(artist_id: str, user_token: Optional[str] = None, market: str = "US") -> List[Dict[str, Any]]:
     """Get artist's top tracks from Spotify"""
@@ -195,6 +210,31 @@ def get_user_top_artists(user_token: str, time_range: str = "medium_term", limit
         pass
     return []
 
+
+def get_user_top_artists_details(user_token: str, time_range: str = "medium_term", limit: int = 20) -> List[Dict[str, Any]]:
+    """Get detailed top artists payload from Spotify (name, id, genres)."""
+    if not user_token:
+        return []
+
+    try:
+        r = requests.get(
+            "https://api.spotify.com/v1/me/top/artists",
+            headers={"Authorization": f"Bearer {user_token}"},
+            params={"time_range": time_range, "limit": limit},
+            timeout=8
+        )
+
+        if r.ok:
+            data = r.json()
+            return [{
+                "name": artist.get("name"),
+                "id": artist.get("id"),
+                "genres": artist.get("genres", [])[:3],
+            } for artist in data.get("items", [])]
+    except Exception:
+        pass
+    return []
+
 def get_user_recent_tracks(user_token: str, limit: int = 20) -> List[str]:
     """Get user's recently played tracks' artists (requires user auth)"""
     if not user_token:
@@ -220,6 +260,232 @@ def get_user_recent_tracks(user_token: str, limit: int = 20) -> List[str]:
     except Exception:
         pass
     return []
+
+
+def get_spotify_recommendations(
+    seed_artist_ids: List[str],
+    obscurity_level: ObscurityLevel,
+    user_token: Optional[str] = None
+) -> Dict[str, Any]:
+    """Generate recommendations from Spotify graph, ranking by genre overlap instead of hard-dropping."""
+    token = user_token or _spotify_client_token or get_spotify_client_token()
+    if not token or not seed_artist_ids:
+        return {"tags": [], "recommendations": []}
+
+    popularity_ceiling = {
+        ObscurityLevel.ULTRA_DEEP: 20,
+        ObscurityLevel.DEEP_CUT: 30,
+        ObscurityLevel.UNDERGROUND: 40,
+        ObscurityLevel.EMERGING: 55,
+        ObscurityLevel.NICHE: 70,
+    }[obscurity_level]
+
+    unique_ids = list(dict.fromkeys(seed_artist_ids))[:5]
+
+    try:
+        seed_genres: List[str] = []
+        seed_artists_r = requests.get(
+            "https://api.spotify.com/v1/artists",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"ids": ",".join(unique_ids)},
+            timeout=10,
+        )
+        if seed_artists_r.ok:
+            for a in seed_artists_r.json().get("artists", []):
+                seed_genres.extend(a.get("genres", [])[:3])
+        seed_genres = list(dict.fromkeys(seed_genres))
+        seed_genre_set = {g.lower() for g in seed_genres}
+
+        r = requests.get(
+            "https://api.spotify.com/v1/recommendations",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "seed_artists": ",".join(unique_ids),
+                "limit": 100,
+                "max_popularity": popularity_ceiling,
+                "min_popularity": 0,
+            },
+            timeout=10,
+        )
+
+        if not r.ok:
+            return {"tags": seed_genres[:8], "recommendations": []}
+
+        candidate_ids: List[str] = []
+        for track in r.json().get("tracks", []):
+            for artist in track.get("artists", []):
+                aid = artist.get("id")
+                if aid and aid not in unique_ids:
+                    candidate_ids.append(aid)
+
+        candidate_ids = list(dict.fromkeys(candidate_ids))[:60]
+        if not candidate_ids:
+            return {"tags": seed_genres[:8], "recommendations": []}
+
+        details_r = requests.get(
+            "https://api.spotify.com/v1/artists",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"ids": ",".join(candidate_ids)},
+            timeout=10,
+        )
+        if not details_r.ok:
+            return {"tags": seed_genres[:8], "recommendations": []}
+
+        ranked: List[tuple[int, Dict[str, Any]]] = []
+        for artist in details_r.json().get("artists", []):
+            if not artist:
+                continue
+
+            pop = artist.get("popularity", 100)
+            if pop > popularity_ceiling:
+                continue
+
+            aid = artist.get("id")
+            name = artist.get("name")
+            if not aid or not name:
+                continue
+
+            artist_genres = artist.get("genres", [])
+            overlap = [g for g in artist_genres if g.lower() in seed_genre_set]
+            score = len(overlap)
+
+            explanation = "Matched on Spotify recommendation graph"
+            if overlap:
+                explanation += f" + shared genres: {', '.join(overlap[:2])}"
+
+            ranked.append((score, {
+                "artist": name,
+                "spotify_id": aid,
+                "explanation": explanation + ".",
+                "tags": (overlap[:2] or artist_genres[:2] or seed_genres[:2]),
+            }))
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        recommendations = [item for _, item in ranked]
+
+        return {
+            "tags": seed_genres[:8],
+            "recommendations": recommendations[:20],
+        }
+    except Exception as e:
+        print(f"Spotify recommendation error: {e}")
+        return {"tags": [], "recommendations": []}
+
+
+
+
+def get_spotify_search_recommendations(
+    artist_terms: List[str],
+    obscurity_level: ObscurityLevel,
+    user_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fallback recommendations from Spotify artist search when seed graph returns nothing."""
+    token = user_token or _spotify_client_token or get_spotify_client_token()
+    if not token or not artist_terms:
+        return {"tags": [], "recommendations": []}
+
+    popularity_ceiling = {
+        ObscurityLevel.ULTRA_DEEP: 20,
+        ObscurityLevel.DEEP_CUT: 30,
+        ObscurityLevel.UNDERGROUND: 40,
+        ObscurityLevel.EMERGING: 55,
+        ObscurityLevel.NICHE: 70,
+    }[obscurity_level]
+
+    candidates: Dict[str, Dict[str, Any]] = {}
+    all_tags: List[str] = []
+
+    for term in artist_terms[:6]:
+        term = (term or "").strip()
+        if not term:
+            continue
+        try:
+            r = requests.get(
+                "https://api.spotify.com/v1/search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": term, "type": "artist", "limit": 20},
+                timeout=8,
+            )
+            if not r.ok:
+                continue
+
+            for artist in r.json().get("artists", {}).get("items", []):
+                aid = artist.get("id")
+                name = artist.get("name")
+                pop = artist.get("popularity", 100)
+                if not aid or not name or pop > popularity_ceiling:
+                    continue
+                genres = artist.get("genres", [])
+                all_tags.extend(genres[:2])
+                if aid not in candidates:
+                    candidates[aid] = {
+                        "artist": name,
+                        "spotify_id": aid,
+                        "explanation": f"Found via Spotify search for '{term}'.",
+                        "tags": genres[:3],
+                    }
+        except Exception:
+            continue
+
+    recs = list(candidates.values())
+    recs.sort(key=lambda a: len(a.get("tags") or []), reverse=True)
+
+    return {
+        "tags": list(dict.fromkeys(all_tags))[:8],
+        "recommendations": recs[:20],
+    }
+
+def resolve_spotify_artist_ids(artist_names: List[str], user_token: Optional[str] = None) -> List[str]:
+    """Resolve free-text artist names to Spotify artist IDs for seed-based discovery."""
+    token = user_token or _spotify_client_token or get_spotify_client_token()
+    if not token:
+        return []
+
+    resolved: List[str] = []
+    for name in artist_names:
+        if not name:
+            continue
+        try:
+            r = requests.get(
+                "https://api.spotify.com/v1/search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": name, "type": "artist", "limit": 1},
+                timeout=8,
+            )
+            if r.ok:
+                items = r.json().get("artists", {}).get("items", [])
+                if items and items[0].get("id"):
+                    resolved.append(items[0]["id"])
+        except Exception:
+            continue
+
+    return list(dict.fromkeys(resolved))[:5]
+
+
+def get_fallback_seed_artist_ids(user_token: Optional[str]) -> List[str]:
+    """Fallback seeds from the connected Spotify account when text terms aren't artists."""
+    if not user_token:
+        return []
+    try:
+        details = get_user_top_artists_details(user_token, "short_term", 8)
+        ids = [a.get("id") for a in details if a.get("id")]
+        return list(dict.fromkeys(ids))[:5]
+    except Exception:
+        return []
+
+
+def get_gemini_model_client():
+    """Lazily load Gemini so app can run without the optional dependency installed."""
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        genai = importlib.import_module("google.generativeai")
+        genai.configure(api_key=GEMINI_API_KEY)
+        return genai.GenerativeModel(GEMINI_MODEL)
+    except Exception as e:
+        print(f"Gemini unavailable, using Spotify-only mode: {e}")
+        return None
 
 def get_youtube_subscribers(artist_name: str) -> tuple[Optional[int], Optional[str]]:
     """
@@ -307,20 +573,21 @@ def get_lastfm_listeners(artist_name: str) -> Optional[int]:
         pass
     return None
 
-def get_artist_followers(artist_name: str, user_token: Optional[str] = None) -> Dict[str, Any]:
+def get_artist_followers(artist_name: str, user_token: Optional[str] = None, spotify_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Get follower/subscriber counts and URLs from multiple sources
-    Returns dict with counts, URLs, and verified name from each source
+    Get follower/subscriber counts and URLs from multiple sources.
+    If spotify_id is provided, Spotify lookup is exact by ID (prevents wrong-artist matching).
     """
-    spotify_followers, spotify_uri, spotify_embed, spotify_verified_name = get_spotify_followers(artist_name, user_token)
-    youtube_subs, youtube_url = get_youtube_subscribers(artist_name)
-    lastfm = get_lastfm_listeners(artist_name)
-    
+    spotify_followers, spotify_uri, spotify_embed, spotify_verified_name, spotify_genres = get_spotify_followers(artist_name, user_token, spotify_id)
+    youtube_subs, youtube_url = get_youtube_subscribers(spotify_verified_name or artist_name)
+    lastfm = get_lastfm_listeners(spotify_verified_name or artist_name)
+
     return {
         "spotify": spotify_followers,
         "spotify_uri": spotify_uri,
         "spotify_embed": spotify_embed,
         "spotify_verified_name": spotify_verified_name,
+        "spotify_genres": spotify_genres or [],
         "youtube": youtube_subs,
         "youtube_url": youtube_url,
         "lastfm": lastfm
@@ -349,7 +616,7 @@ def get_spotify_auth_url():
     if not SPOTIFY_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Spotify client ID not configured")
     
-    scope = "user-top-read user-read-recently-played"
+    scope = "user-top-read user-read-recently-played playlist-modify-public playlist-modify-private"
     state = secrets.token_urlsafe(16)
     
     auth_url = (
@@ -400,19 +667,90 @@ def exchange_spotify_code(code: str):
 @app.get("/spotify/suggestions")
 def get_spotify_suggestions(token: str):
     """Get artist suggestions based on user's Spotify listening history"""
-    top_artists = get_user_top_artists(token, "short_term", 10)
+    top_artists = get_user_top_artists_details(token, "short_term", 10)
     recent_artists = get_user_recent_tracks(token, 20)
     
     # Combine and deduplicate
     all_artists = []
-    for artist in top_artists + recent_artists:
-        if artist not in all_artists:
+    for artist in top_artists:
+        if artist.get("name") not in [a.get("name") for a in all_artists if isinstance(a, dict)]:
             all_artists.append(artist)
+    for artist in recent_artists:
+        if artist not in [a.get("name") for a in all_artists if isinstance(a, dict)]:
+            all_artists.append({"name": artist, "id": None, "genres": []})
     
     return {
         "suggestions": all_artists[:10],
-        "top_artists": top_artists[:5],
+        "top_artists": [a.get("name") for a in top_artists[:5]],
         "recent_artists": recent_artists[:5]
+    }
+
+
+@app.post("/spotify/save-playlist")
+def save_spotify_playlist(data: SavePlaylistInput):
+    """Create a Spotify playlist from recommended artist IDs."""
+    token = data.token
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    me_r = requests.get("https://api.spotify.com/v1/me", headers=headers, timeout=8)
+    if not me_r.ok:
+        raise HTTPException(status_code=401, detail="Invalid Spotify token")
+
+    user_id = me_r.json().get("id")
+    if not user_id:
+        raise HTTPException(status_code=500, detail="Could not resolve Spotify user")
+
+    track_uris: List[str] = []
+    for artist_id in list(dict.fromkeys(data.artist_ids))[:25]:
+        top_r = requests.get(
+            f"https://api.spotify.com/v1/artists/{artist_id}/top-tracks",
+            headers=headers,
+            params={"market": "US"},
+            timeout=8,
+        )
+        if top_r.ok:
+            tracks = top_r.json().get("tracks", [])
+            if tracks:
+                uri = tracks[0].get("uri")
+                if uri and uri not in track_uris:
+                    track_uris.append(uri)
+        if len(track_uris) >= 50:
+            break
+
+    if not track_uris:
+        raise HTTPException(status_code=400, detail="No playable tracks found for selected artists")
+
+    create_r = requests.post(
+        f"https://api.spotify.com/v1/users/{user_id}/playlists",
+        headers=headers,
+        json={
+            "name": data.name[:100],
+            "public": False,
+            "description": "Generated by Uncover from your Spotify-driven discoveries",
+        },
+        timeout=8,
+    )
+
+    if not create_r.ok:
+        raise HTTPException(status_code=400, detail="Failed to create playlist")
+
+    playlist = create_r.json()
+    playlist_id = playlist.get("id")
+    if not playlist_id:
+        raise HTTPException(status_code=500, detail="Playlist created but missing ID")
+
+    add_r = requests.post(
+        f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
+        headers=headers,
+        json={"uris": track_uris[:50]},
+        timeout=8,
+    )
+    if not add_r.ok:
+        raise HTTPException(status_code=400, detail="Playlist created but adding tracks failed")
+
+    return {
+        "playlist_url": playlist.get("external_urls", {}).get("spotify") or playlist.get("uri"),
+        "tracks_added": len(track_uris[:50]),
     }
 
 # ---------- Helpers ----------
@@ -447,7 +785,10 @@ def ai_recommend(artists: List[str], obscurity_level: ObscurityLevel) -> Dict[st
     }}
     """
     
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    model = get_gemini_model_client()
+    if not model:
+        return {"tags": [], "recommendations": []}
+
     resp = model.generate_content(prompt)
 
     try:
@@ -505,66 +846,78 @@ def fallback_lastfm_image(artist_name: str) -> str | None:
         pass
     return None
 
+def summarize_spotify_recommendations(seed_artists: List[str], recommendations: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Use Gemini only to write short summaries for already-verified Spotify artists."""
+    model = get_gemini_model_client()
+    if not model or not recommendations:
+        return {}
+
+    artist_names = [r.get("artist") for r in recommendations if r.get("artist")][:8]
+    if not artist_names:
+        return {}
+
+    prompt = f"""
+    You are given Spotify-verified artist recommendations.
+    Seed artists/vibes: {', '.join(seed_artists)}
+    Recommended artists: {', '.join(artist_names)}
+
+    Write one concise sentence for each recommended artist explaining why it fits.
+    IMPORTANT:
+    - Use ONLY the provided recommended artist names
+    - Do not add new artists
+    - Return strict JSON object mapping artist name -> explanation sentence
+    """
+
+    try:
+        resp = model.generate_content(prompt)
+        parsed = json.loads(resp.text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_token: Optional[str] = None) -> List[Dict[str, Any]]:
     enriched = []
-    skipped_artists = []  # Track artists that were filtered out
-    
+    skipped_artists = []
+
     for r in recs:
         name = r.get("artist", "")
-        
-        # Get follower/listener counts from all sources
-        counts = get_artist_followers(name, user_token)
+        spotify_id = r.get("spotify_id")
+
+        counts = get_artist_followers(name, user_token, spotify_id)
         follower_count = get_best_follower_count(counts)
-        
-        # Use Spotify verified name if available, otherwise use AI suggested name
         verified_name = counts.get("spotify_verified_name") or name
-        
-        # Skip if over the limit (with some logging)
+
         if follower_count and follower_count > max_followers:
-            skipped_artists.append({
-                "ai_name": name,
-                "verified_name": verified_name,
-                "followers": follower_count
-            })
-            print(f"Filtered out: {name} (verified as {verified_name}) with {follower_count:,} followers (max: {max_followers:,})")
+            skipped_artists.append({"name": verified_name, "followers": follower_count})
             continue
-        
-        # Skip if artist not found on any platform
-        if not follower_count and not counts.get("spotify_uri"):
-            print(f"Warning: Could not verify artist '{name}' on any platform")
+
+        if not counts.get("spotify_uri"):
+            # Super Spotify-first: reject non-Spotify verifiable entries.
             continue
-        
-        # Get top tracks if we have Spotify data
+
         top_tracks = []
-        if counts.get("spotify_uri"):
-            artist_id = counts["spotify_uri"].split(":")[-1] if counts["spotify_uri"] else None
-            if artist_id:
-                top_tracks = get_spotify_top_tracks(artist_id, user_token)
-        
+        artist_id = counts["spotify_uri"].split(":")[-1] if counts.get("spotify_uri") else None
+        if artist_id:
+            top_tracks = get_spotify_top_tracks(artist_id, user_token)
+
         meta = enrich_with_itunes(verified_name)
         if not meta.get("image"):
             lf_img = fallback_lastfm_image(verified_name)
             if lf_img:
                 meta["image"] = lf_img
-        
+
         encoded_name = urllib.parse.quote_plus(verified_name)
-        
-        # Determine which link to use: Last.fm or YouTube
-        if LASTFM_KEY:
-            primary_url = f"https://www.last.fm/music/{encoded_name}"
-            primary_url_label = "Last.fm"
-        elif counts.get("youtube_url"):
-            primary_url = counts["youtube_url"]
-            primary_url_label = "YouTube"
-        else:
-            primary_url = f"https://www.youtube.com/results?search_query={encoded_name}"
-            primary_url_label = "YouTube"
+        primary_url = f"https://www.last.fm/music/{encoded_name}" if LASTFM_KEY else f"https://open.spotify.com/artist/{artist_id}" if artist_id else f"https://www.youtube.com/results?search_query={encoded_name}"
+        primary_url_label = "Last.fm" if LASTFM_KEY else "Spotify" if artist_id else "YouTube"
+
+        merged_tags = list(dict.fromkeys((r.get("tags") or []) + (counts.get("spotify_genres") or [])))[:4]
 
         enriched.append({
-            "artist": verified_name,  # Use verified name from Spotify
-            "ai_suggested_name": name,  # Keep original AI suggestion for reference
+            "artist": verified_name,
+            "ai_suggested_name": name,
             "explanation": r.get("explanation", ""),
-            "tags": r.get("tags", []),
+            "tags": merged_tags,
             "image": meta.get("image"),
             "sampleUrl": meta.get("sampleUrl"),
             "sampleTrack": meta.get("sampleTrack"),
@@ -581,19 +934,19 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
                 "lastfm": counts.get("lastfm")
             },
             "obscurityScore": calculate_obscurity_score(follower_count) if follower_count else None,
-            "verified": bool(counts.get("spotify_uri"))  # Flag if we found them on Spotify
+            "verified": bool(counts.get("spotify_uri")),
+            "spotifyVerified": bool(counts.get("spotify_uri")),
+            "confidence": "high" if counts.get("spotify_uri") and counts.get("lastfm") else "medium" if counts.get("spotify_uri") else "low",
         })
-    
-    # Sort by obscurity (fewer followers first)
+
     enriched.sort(key=lambda x: x.get("followers") or 0)
-    
-    # Log summary
+
     print(f"\n=== Filtering Summary ===")
-    print(f"Total AI recommendations: {len(recs)}")
-    print(f"Passed filter: {len(enriched)}")
+    print(f"Total recommendations: {len(recs)}")
+    print(f"Passed Spotify verification: {len(enriched)}")
     print(f"Filtered out (too popular): {len(skipped_artists)}")
     print(f"Returning top {min(5, len(enriched))} artists")
-    
+
     return enriched[:5]
 
 def calculate_obscurity_score(followers: int) -> int:
@@ -619,10 +972,32 @@ def analyze_artists(data: ArtistInput):
     level = data.obscurity_level or ObscurityLevel.DEEP_CUT
     level_info = OBSCURITY_PROMPTS[level]
     
-    base = ai_recommend(data.artists or [], level)
+    seed_ids = [hint.get("id") for hint in (data.spotify_hints or []) if hint.get("id")]
+    if not seed_ids:
+        seed_ids = resolve_spotify_artist_ids(data.artists or [], data.spotify_token)
+    if not seed_ids:
+        seed_ids = get_fallback_seed_artist_ids(data.spotify_token)
+
+    # Spotify-first retrieval with robust fallbacks before summaries.
+    base = get_spotify_recommendations(seed_ids, level, data.spotify_token) if seed_ids else {"tags": [], "recommendations": []}
+
+    # If seed graph returns nothing (common for vague text inputs), fall back to Spotify search discovery.
+    if not base.get("recommendations"):
+        base = get_spotify_search_recommendations(data.artists or [], level, data.spotify_token)
+
+    # Final fallback: use Gemini candidate generation, then Spotify verification in enrichment.
+    if not base.get("recommendations"):
+        base = ai_recommend(data.artists or [], level)
+
     tags = base.get("tags", [])
     recs = base.get("recommendations", [])
-    
+
+    summary_map = summarize_spotify_recommendations(data.artists or [], recs)
+    for rec in recs:
+        name = rec.get("artist")
+        if name in summary_map:
+            rec["explanation"] = summary_map[name]
+
     enriched = enrich_recommendations(recs, level_info["max_followers"], data.spotify_token)
     
     return {
