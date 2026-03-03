@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os, requests, urllib.parse, time, secrets
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from enum import Enum
@@ -145,17 +145,37 @@ def filter_by_language(candidates: List[Dict], region: str) -> List[Dict]:
     if not keywords or not LASTFM_KEY:
         return candidates
 
+    # Language filtering can be expensive (one Last.fm call per candidate).
+    # Keep it bounded so /analyze does not feel hung on slower networks/APIs.
+    max_checks = min(len(candidates), 25)
+    window = candidates[:max_checks]
+
     def check(rec):
         combined = " ".join(_norm(t) for t in lastfm_get_artist_tags(rec["name"]))
         return rec if any(kw in combined for kw in keywords) else None
 
     kept = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for result in ex.map(check, candidates):
-            if result:
-                kept.append(result)
+        futures = [ex.submit(check, rec) for rec in window]
+        deadline = time.time() + 12
+        try:
+            for future in as_completed(futures, timeout=12):
+                try:
+                    result = future.result()
+                    if result:
+                        kept.append(result)
+                except Exception:
+                    pass
+                if time.time() >= deadline:
+                    break
+        except TimeoutError:
+            pass
 
-    print(f"[language] filter: {len(candidates)} -> {len(kept)} ({region} only)")
+        for f in futures:
+            if not f.done():
+                f.cancel()
+
+    print(f"[language] filter: {len(window)} checked -> {len(kept)} ({region} only)")
     return kept if len(kept) >= 2 else candidates
 
 def build_explanation(artist_name: str, tags: List[str], seed_artists: List[str]) -> str:
