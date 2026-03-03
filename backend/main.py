@@ -70,6 +70,13 @@ class ArtistInput(BaseModel):
     artists: List[str]
     obscurity_level: Optional[ObscurityLevel] = ObscurityLevel.DEEP_CUT
     spotify_token: Optional[str] = None
+    spotify_hints: Optional[List[Dict[str, Any]]] = None
+
+
+class SavePlaylistInput(BaseModel):
+    token: str
+    artist_ids: List[str]
+    name: str
 
 # --- Spotify Token Cache & User Tokens ---
 _spotify_client_token = None
@@ -195,6 +202,31 @@ def get_user_top_artists(user_token: str, time_range: str = "medium_term", limit
         pass
     return []
 
+
+def get_user_top_artists_details(user_token: str, time_range: str = "medium_term", limit: int = 20) -> List[Dict[str, Any]]:
+    """Get detailed top artists payload from Spotify (name, id, genres)."""
+    if not user_token:
+        return []
+
+    try:
+        r = requests.get(
+            "https://api.spotify.com/v1/me/top/artists",
+            headers={"Authorization": f"Bearer {user_token}"},
+            params={"time_range": time_range, "limit": limit},
+            timeout=8
+        )
+
+        if r.ok:
+            data = r.json()
+            return [{
+                "name": artist.get("name"),
+                "id": artist.get("id"),
+                "genres": artist.get("genres", [])[:3],
+            } for artist in data.get("items", [])]
+    except Exception:
+        pass
+    return []
+
 def get_user_recent_tracks(user_token: str, limit: int = 20) -> List[str]:
     """Get user's recently played tracks' artists (requires user auth)"""
     if not user_token:
@@ -220,6 +252,78 @@ def get_user_recent_tracks(user_token: str, limit: int = 20) -> List[str]:
     except Exception:
         pass
     return []
+
+
+def get_spotify_recommendations(
+    seed_artist_ids: List[str],
+    obscurity_level: ObscurityLevel,
+    user_token: Optional[str] = None
+) -> Dict[str, Any]:
+    """Generate recommendations directly from Spotify's recommendation graph."""
+    token = user_token or _spotify_client_token or get_spotify_client_token()
+    if not token or not seed_artist_ids:
+        return {"tags": [], "recommendations": []}
+
+    popularity_ceiling = {
+        ObscurityLevel.ULTRA_DEEP: 20,
+        ObscurityLevel.DEEP_CUT: 30,
+        ObscurityLevel.UNDERGROUND: 40,
+        ObscurityLevel.EMERGING: 55,
+        ObscurityLevel.NICHE: 70,
+    }[obscurity_level]
+
+    unique_ids = list(dict.fromkeys(seed_artist_ids))[:5]
+
+    try:
+        r = requests.get(
+            "https://api.spotify.com/v1/recommendations",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "seed_artists": ",".join(unique_ids),
+                "limit": 80,
+                "max_popularity": popularity_ceiling,
+                "min_popularity": 5,
+            },
+            timeout=10,
+        )
+
+        if not r.ok:
+            return {"tags": [], "recommendations": []}
+
+        track_items = r.json().get("tracks", [])
+        artist_bucket: Dict[str, Dict[str, Any]] = {}
+
+        for track in track_items:
+            for artist in track.get("artists", []):
+                aid = artist.get("id")
+                name = artist.get("name")
+                if not aid or not name:
+                    continue
+                if aid not in artist_bucket:
+                    artist_bucket[aid] = {
+                        "artist": name,
+                        "spotify_id": aid,
+                        "explanation": "Matched by Spotify's recommendation graph from your seed artists.",
+                        "tags": [],
+                    }
+
+        tags = []
+        for artist_id in unique_ids:
+            detail_r = requests.get(
+                f"https://api.spotify.com/v1/artists/{artist_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=8,
+            )
+            if detail_r.ok:
+                tags.extend(detail_r.json().get("genres", [])[:2])
+
+        return {
+            "tags": list(dict.fromkeys(tags))[:8],
+            "recommendations": list(artist_bucket.values())[:20],
+        }
+    except Exception as e:
+        print(f"Spotify recommendation error: {e}")
+        return {"tags": [], "recommendations": []}
 
 def get_youtube_subscribers(artist_name: str) -> tuple[Optional[int], Optional[str]]:
     """
@@ -349,7 +453,7 @@ def get_spotify_auth_url():
     if not SPOTIFY_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Spotify client ID not configured")
     
-    scope = "user-top-read user-read-recently-played"
+    scope = "user-top-read user-read-recently-played playlist-modify-public playlist-modify-private"
     state = secrets.token_urlsafe(16)
     
     auth_url = (
@@ -400,19 +504,90 @@ def exchange_spotify_code(code: str):
 @app.get("/spotify/suggestions")
 def get_spotify_suggestions(token: str):
     """Get artist suggestions based on user's Spotify listening history"""
-    top_artists = get_user_top_artists(token, "short_term", 10)
+    top_artists = get_user_top_artists_details(token, "short_term", 10)
     recent_artists = get_user_recent_tracks(token, 20)
     
     # Combine and deduplicate
     all_artists = []
-    for artist in top_artists + recent_artists:
-        if artist not in all_artists:
+    for artist in top_artists:
+        if artist.get("name") not in [a.get("name") for a in all_artists if isinstance(a, dict)]:
             all_artists.append(artist)
+    for artist in recent_artists:
+        if artist not in [a.get("name") for a in all_artists if isinstance(a, dict)]:
+            all_artists.append({"name": artist, "id": None, "genres": []})
     
     return {
         "suggestions": all_artists[:10],
-        "top_artists": top_artists[:5],
+        "top_artists": [a.get("name") for a in top_artists[:5]],
         "recent_artists": recent_artists[:5]
+    }
+
+
+@app.post("/spotify/save-playlist")
+def save_spotify_playlist(data: SavePlaylistInput):
+    """Create a Spotify playlist from recommended artist IDs."""
+    token = data.token
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    me_r = requests.get("https://api.spotify.com/v1/me", headers=headers, timeout=8)
+    if not me_r.ok:
+        raise HTTPException(status_code=401, detail="Invalid Spotify token")
+
+    user_id = me_r.json().get("id")
+    if not user_id:
+        raise HTTPException(status_code=500, detail="Could not resolve Spotify user")
+
+    track_uris: List[str] = []
+    for artist_id in list(dict.fromkeys(data.artist_ids))[:25]:
+        top_r = requests.get(
+            f"https://api.spotify.com/v1/artists/{artist_id}/top-tracks",
+            headers=headers,
+            params={"market": "US"},
+            timeout=8,
+        )
+        if top_r.ok:
+            tracks = top_r.json().get("tracks", [])
+            if tracks:
+                uri = tracks[0].get("uri")
+                if uri and uri not in track_uris:
+                    track_uris.append(uri)
+        if len(track_uris) >= 50:
+            break
+
+    if not track_uris:
+        raise HTTPException(status_code=400, detail="No playable tracks found for selected artists")
+
+    create_r = requests.post(
+        f"https://api.spotify.com/v1/users/{user_id}/playlists",
+        headers=headers,
+        json={
+            "name": data.name[:100],
+            "public": False,
+            "description": "Generated by Uncover from your Spotify-driven discoveries",
+        },
+        timeout=8,
+    )
+
+    if not create_r.ok:
+        raise HTTPException(status_code=400, detail="Failed to create playlist")
+
+    playlist = create_r.json()
+    playlist_id = playlist.get("id")
+    if not playlist_id:
+        raise HTTPException(status_code=500, detail="Playlist created but missing ID")
+
+    add_r = requests.post(
+        f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
+        headers=headers,
+        json={"uris": track_uris[:50]},
+        timeout=8,
+    )
+    if not add_r.ok:
+        raise HTTPException(status_code=400, detail="Playlist created but adding tracks failed")
+
+    return {
+        "playlist_url": playlist.get("external_urls", {}).get("spotify") or playlist.get("uri"),
+        "tracks_added": len(track_uris[:50]),
     }
 
 # ---------- Helpers ----------
@@ -619,7 +794,12 @@ def analyze_artists(data: ArtistInput):
     level = data.obscurity_level or ObscurityLevel.DEEP_CUT
     level_info = OBSCURITY_PROMPTS[level]
     
-    base = ai_recommend(data.artists or [], level)
+    seed_ids = [hint.get("id") for hint in (data.spotify_hints or []) if hint.get("id")]
+
+    # Spotify-first: only call Gemini when Spotify recommendations are unavailable.
+    base = get_spotify_recommendations(seed_ids, level, data.spotify_token) if seed_ids else {"tags": [], "recommendations": []}
+    if not base.get("recommendations"):
+        base = ai_recommend(data.artists or [], level)
     tags = base.get("tags", [])
     recs = base.get("recommendations", [])
     
