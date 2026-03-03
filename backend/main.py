@@ -372,6 +372,69 @@ def get_spotify_recommendations(
         return {"tags": [], "recommendations": []}
 
 
+
+
+def get_spotify_search_recommendations(
+    artist_terms: List[str],
+    obscurity_level: ObscurityLevel,
+    user_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fallback recommendations from Spotify artist search when seed graph returns nothing."""
+    token = user_token or _spotify_client_token or get_spotify_client_token()
+    if not token or not artist_terms:
+        return {"tags": [], "recommendations": []}
+
+    popularity_ceiling = {
+        ObscurityLevel.ULTRA_DEEP: 20,
+        ObscurityLevel.DEEP_CUT: 30,
+        ObscurityLevel.UNDERGROUND: 40,
+        ObscurityLevel.EMERGING: 55,
+        ObscurityLevel.NICHE: 70,
+    }[obscurity_level]
+
+    candidates: Dict[str, Dict[str, Any]] = {}
+    all_tags: List[str] = []
+
+    for term in artist_terms[:6]:
+        term = (term or "").strip()
+        if not term:
+            continue
+        try:
+            r = requests.get(
+                "https://api.spotify.com/v1/search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": term, "type": "artist", "limit": 20},
+                timeout=8,
+            )
+            if not r.ok:
+                continue
+
+            for artist in r.json().get("artists", {}).get("items", []):
+                aid = artist.get("id")
+                name = artist.get("name")
+                pop = artist.get("popularity", 100)
+                if not aid or not name or pop > popularity_ceiling:
+                    continue
+                genres = artist.get("genres", [])
+                all_tags.extend(genres[:2])
+                if aid not in candidates:
+                    candidates[aid] = {
+                        "artist": name,
+                        "spotify_id": aid,
+                        "explanation": f"Found via Spotify search for '{term}'.",
+                        "tags": genres[:3],
+                    }
+        except Exception:
+            continue
+
+    recs = list(candidates.values())
+    recs.sort(key=lambda a: len(a.get("tags") or []), reverse=True)
+
+    return {
+        "tags": list(dict.fromkeys(all_tags))[:8],
+        "recommendations": recs[:20],
+    }
+
 def resolve_spotify_artist_ids(artist_names: List[str], user_token: Optional[str] = None) -> List[str]:
     """Resolve free-text artist names to Spotify artist IDs for seed-based discovery."""
     token = user_token or _spotify_client_token or get_spotify_client_token()
@@ -915,8 +978,17 @@ def analyze_artists(data: ArtistInput):
     if not seed_ids:
         seed_ids = get_fallback_seed_artist_ids(data.spotify_token)
 
-    # Strict Spotify retrieval mode; Gemini is used only for optional summaries.
+    # Spotify-first retrieval with robust fallbacks before summaries.
     base = get_spotify_recommendations(seed_ids, level, data.spotify_token) if seed_ids else {"tags": [], "recommendations": []}
+
+    # If seed graph returns nothing (common for vague text inputs), fall back to Spotify search discovery.
+    if not base.get("recommendations"):
+        base = get_spotify_search_recommendations(data.artists or [], level, data.spotify_token)
+
+    # Final fallback: use Gemini candidate generation, then Spotify verification in enrichment.
+    if not base.get("recommendations"):
+        base = ai_recommend(data.artists or [], level)
+
     tags = base.get("tags", [])
     recs = base.get("recommendations", [])
 
