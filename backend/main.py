@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
+import importlib
 import os, json, requests, urllib.parse
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
@@ -11,8 +11,8 @@ import secrets
 load_dotenv()
 
 # --- Configure Gemini ---
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 GEMINI_MODEL = "models/gemini-2.5-flash"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- API Keys ---
 LASTFM_KEY = os.getenv("LASTFM_API_KEY")
@@ -325,6 +325,48 @@ def get_spotify_recommendations(
         print(f"Spotify recommendation error: {e}")
         return {"tags": [], "recommendations": []}
 
+
+
+def resolve_spotify_artist_ids(artist_names: List[str], user_token: Optional[str] = None) -> List[str]:
+    """Resolve free-text artist names to Spotify artist IDs for seed-based discovery."""
+    token = user_token or _spotify_client_token or get_spotify_client_token()
+    if not token:
+        return []
+
+    resolved: List[str] = []
+    for name in artist_names:
+        if not name:
+            continue
+        try:
+            r = requests.get(
+                "https://api.spotify.com/v1/search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": name, "type": "artist", "limit": 1},
+                timeout=8,
+            )
+            if r.ok:
+                items = r.json().get("artists", {}).get("items", [])
+                if items and items[0].get("id"):
+                    resolved.append(items[0]["id"])
+        except Exception:
+            continue
+
+    return list(dict.fromkeys(resolved))[:5]
+
+
+def get_gemini_model_client():
+    """Lazily load Gemini so app can run without the optional dependency installed."""
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        genai = importlib.import_module("google.generativeai")
+        genai.configure(api_key=GEMINI_API_KEY)
+        return genai.GenerativeModel(GEMINI_MODEL)
+    except Exception as e:
+        print(f"Gemini unavailable, using Spotify-only mode: {e}")
+        return None
+
 def get_youtube_subscribers(artist_name: str) -> tuple[Optional[int], Optional[str]]:
     """
     Get subscriber count and channel URL from YouTube Data API
@@ -622,7 +664,10 @@ def ai_recommend(artists: List[str], obscurity_level: ObscurityLevel) -> Dict[st
     }}
     """
     
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    model = get_gemini_model_client()
+    if not model:
+        return {"tags": [], "recommendations": []}
+
     resp = model.generate_content(prompt)
 
     try:
@@ -795,6 +840,8 @@ def analyze_artists(data: ArtistInput):
     level_info = OBSCURITY_PROMPTS[level]
     
     seed_ids = [hint.get("id") for hint in (data.spotify_hints or []) if hint.get("id")]
+    if not seed_ids:
+        seed_ids = resolve_spotify_artist_ids(data.artists or [], data.spotify_token)
 
     # Spotify-first: only call Gemini when Spotify recommendations are unavailable.
     base = get_spotify_recommendations(seed_ids, level, data.spotify_token) if seed_ids else {"tags": [], "recommendations": []}
