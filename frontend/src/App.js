@@ -322,6 +322,7 @@ export default function App() {
         setSpotifyToken(data.access_token);
         setSpotifyConnected(true);
         localStorage.setItem('spotify_token', data.access_token);
+        if (data.refresh_token) localStorage.setItem('spotify_refresh_token', data.refresh_token);
         loadSpotifySuggestions(data.access_token);
       }
     } catch { setError("Failed to authenticate with Spotify"); }
@@ -338,19 +339,34 @@ export default function App() {
 
   const disconnectSpotify = () => {
     setSpotifyToken(null); setSpotifyConnected(false);
-    setSuggestions([]); localStorage.removeItem('spotify_token');
+    setSuggestions([]); localStorage.removeItem('spotify_token'); localStorage.removeItem('spotify_refresh_token');
   };
 
   // ── Save to Spotify Playlist ──
+
+  const refreshSpotifyToken = async () => {
+    const refreshToken = localStorage.getItem('spotify_refresh_token');
+    if (!refreshToken) return null;
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/spotify/refresh?refresh_token=${encodeURIComponent(refreshToken)}`, { method: "POST" });
+      const data = await res.json();
+      if (data.access_token) {
+        setSpotifyToken(data.access_token);
+        localStorage.setItem('spotify_token', data.access_token);
+        return data.access_token;
+      }
+    } catch {}
+    return null;
+  };
+
   const savePlaylist = async () => {
     if (!spotifyToken || playlist.length === 0) return;
     setSavingPlaylist(true);
     setPlaylistSaved(null);
 
-    // Extract Spotify artist IDs - try spotifyUri first, then parse spotifyUrl
     const artist_ids = playlist.map(a => {
       if (a.spotifyUri) return a.spotifyUri.split(":").pop();
-      if (a.spotifyUrl) return a.spotifyUrl.split("/").pop();
+      if (a.spotifyUrl) return a.spotifyUrl.split("/").pop()?.split("?")[0];
       return null;
     }).filter(Boolean);
 
@@ -360,26 +376,30 @@ export default function App() {
       return;
     }
 
-    try {
+    const trySave = async (tokenToUse) => {
       const res = await fetch("http://127.0.0.1:8000/spotify/save-playlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          token: spotifyToken,
-          artist_ids,
-          name: `Uncover: ${input || "discoveries"}`,
-        }),
+        body: JSON.stringify({ token: tokenToUse, artist_ids, name: `Uncover: ${input || "discoveries"}` }),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Server error");
+      return res.json();
+    };
+
+    try {
+      // Try a refreshed token first, then fallback to current token.
+      const refreshed = await refreshSpotifyToken();
+      let data = await trySave(refreshed || spotifyToken);
+
+      // If Spotify reports an invalid token, refresh once and retry.
+      if (data?.error === "invalid token") {
+        const retryToken = await refreshSpotifyToken();
+        if (retryToken) data = await trySave(retryToken);
       }
-      const data = await res.json();
-      // Ensure we have a web URL not a spotify: URI
-      let url = data.playlist_url;
-      if (url && url.startsWith("spotify:playlist:")) {
-        const id = url.split(":").pop();
-        url = `https://open.spotify.com/playlist/${id}`;
+
+      if (data?.error) throw new Error(data.error);
+      let url = data?.playlist_url;
+      if (url?.startsWith("spotify:playlist:")) {
+        url = `https://open.spotify.com/playlist/${url.split(":").pop()}`;
       }
       setPlaylistSaved(url || "no_url");
     } catch (e) {
@@ -549,6 +569,19 @@ export default function App() {
           {!spotifyConnected && (
             <p className="playlist-note">Connect Spotify to save this as a playlist</p>
           )}
+        </div>
+      )}
+
+      {/* Playlist saved toast */}
+      {playlistSaved && playlistSaved !== "error" && playlistSaved !== "no_ids" && (
+        <div className="playlist-toast">
+          <span>✓ Playlist saved</span>
+          {playlistSaved.startsWith("http") && (
+            <a href={playlistSaved} target="_blank" rel="noreferrer">
+              Open in Spotify ↗
+            </a>
+          )}
+          <button onClick={() => setPlaylistSaved(null)}>✕</button>
         </div>
       )}
 

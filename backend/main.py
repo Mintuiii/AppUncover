@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os, requests, urllib.parse, time, secrets
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from enum import Enum
@@ -145,17 +145,37 @@ def filter_by_language(candidates: List[Dict], region: str) -> List[Dict]:
     if not keywords or not LASTFM_KEY:
         return candidates
 
+    # Language filtering can be expensive (one Last.fm call per candidate).
+    # Keep it bounded so /analyze does not feel hung on slower networks/APIs.
+    max_checks = min(len(candidates), 25)
+    window = candidates[:max_checks]
+
     def check(rec):
         combined = " ".join(_norm(t) for t in lastfm_get_artist_tags(rec["name"]))
         return rec if any(kw in combined for kw in keywords) else None
 
     kept = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for result in ex.map(check, candidates):
-            if result:
-                kept.append(result)
+        futures = [ex.submit(check, rec) for rec in window]
+        deadline = time.time() + 12
+        try:
+            for future in as_completed(futures, timeout=12):
+                try:
+                    result = future.result()
+                    if result:
+                        kept.append(result)
+                except Exception:
+                    pass
+                if time.time() >= deadline:
+                    break
+        except TimeoutError:
+            pass
 
-    print(f"[language] filter: {len(candidates)} -> {len(kept)} ({region} only)")
+        for f in futures:
+            if not f.done():
+                f.cancel()
+
+    print(f"[language] filter: {len(window)} checked -> {len(kept)} ({region} only)")
     return kept if len(kept) >= 2 else candidates
 
 def build_explanation(artist_name: str, tags: List[str], seed_artists: List[str]) -> str:
@@ -409,11 +429,17 @@ def analyze_artists(data: ArtistInput):
     token = get_token(data.spotify_token)
     print(f"token={'yes' if token else 'NO'}")
 
-    # --- Step 1: top artists + genres from Spotify (parallel) ---
-    top_artists: List[str] = [h["name"] for h in (data.spotify_hints or []) if h.get("name")]
+    # --- Step 1: seed artists + optional Spotify personalization ---
+    input_artists = [a.strip() for a in (data.artists or []) if a and a.strip()]
+    top_artists: List[str] = list(dict.fromkeys(input_artists + [h["name"] for h in (data.spotify_hints or []) if h.get("name")]))
     top_genres:  List[str] = []
 
-    if data.spotify_token:
+    for hint in (data.spotify_hints or []):
+        top_genres.extend((hint.get("genres") or [])[:2])
+
+    # If the user gave explicit artists, keep discovery anchored to that input.
+    # Only pull account-wide top artists when there is no direct input.
+    if data.spotify_token and not input_artists:
         def fetch_range(time_range):
             r = requests.get("https://api.spotify.com/v1/me/top/artists",
                 headers={"Authorization": f"Bearer {data.spotify_token}"},
@@ -431,7 +457,7 @@ def analyze_artists(data: ArtistInput):
             print(f"[top_artists] error: {e}")
 
     top_genres = list(dict.fromkeys(top_genres))
-    print(f"top_artists={top_artists[:5]} top_genres={top_genres[:5]}")
+    print(f"seed_artists={top_artists[:5]} top_genres={top_genres[:5]}")
 
     # --- Step 2: derive search tags ---
     search_tags = derive_search_tags(data.artists or [], top_artists[:8], top_genres[:8])
@@ -441,10 +467,11 @@ def analyze_artists(data: ArtistInput):
 
     # --- Step 3: discover candidates via Last.fm (parallel) ---
     candidate_names: Dict[str, None] = {}
-    seed_lower = {n.lower() for n in top_artists}
+    discovery_seeds = top_artists[:5]
+    seed_lower = {n.lower() for n in discovery_seeds}
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        for names in ex.map(lambda a: lastfm_similar_artists(a, 50), top_artists[:5]):
+        for names in ex.map(lambda a: lastfm_similar_artists(a, 50), discovery_seeds):
             for name in names:
                 if name.lower() not in seed_lower:
                     candidate_names[name] = None
@@ -466,7 +493,7 @@ def analyze_artists(data: ArtistInput):
                 "obscurity_level": level, "max_followers": max_fol, "description": cfg["description"]}
 
     # --- Step 3b: language detection ---
-    seed_language = detect_seed_language(top_artists[:5], top_genres[:10]) if top_artists else None
+    seed_language = detect_seed_language(discovery_seeds, top_genres[:10]) if discovery_seeds else None
 
     # --- Step 4: parallel candidate verification ---
     names_list = list(candidate_names.keys())[:60]
@@ -557,6 +584,16 @@ def exchange_spotify_code(code: str):
         return {"access_token": d.get("access_token"), "refresh_token": d.get("refresh_token"),
                 "expires_in": d.get("expires_in")}
     return {"error": "failed"}
+
+@app.post("/spotify/refresh")
+def refresh_spotify_token(refresh_token: str):
+    r = requests.post("https://accounts.spotify.com/api/token",
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET), timeout=10)
+    if r.ok:
+        d = r.json()
+        return {"access_token": d.get("access_token"), "expires_in": d.get("expires_in")}
+    return {"error": "failed to refresh token"}
 
 @app.get("/spotify/suggestions")
 def get_spotify_suggestions(token: str):
