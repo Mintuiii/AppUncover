@@ -558,6 +558,16 @@ def exchange_spotify_code(code: str):
                 "expires_in": d.get("expires_in")}
     return {"error": "failed"}
 
+@app.post("/spotify/refresh")
+def refresh_spotify_token(refresh_token: str):
+    r = requests.post("https://accounts.spotify.com/api/token",
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET), timeout=10)
+    if r.ok:
+        d = r.json()
+        return {"access_token": d.get("access_token"), "expires_in": d.get("expires_in")}
+    return {"error": "failed to refresh token"}
+
 @app.get("/spotify/suggestions")
 def get_spotify_suggestions(token: str):
     hdrs = {"Authorization": f"Bearer {token}"}
