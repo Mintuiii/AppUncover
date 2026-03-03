@@ -365,7 +365,7 @@ def get_spotify_recommendations(
 
         return {
             "tags": seed_genres[:8],
-            "recommendations": recommendations[:20],
+            "recommendations": recommendations[:60],
         }
     except Exception as e:
         print(f"Spotify recommendation error: {e}")
@@ -876,8 +876,29 @@ def summarize_spotify_recommendations(seed_artists: List[str], recommendations: 
         return {}
 
 
-def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_token: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Enrich and adaptively relax follower filter so users still get usable, verified results."""
+def build_comparative_summary(seed_artists: List[str], artist_name: str, tags: List[str], followers: Optional[int]) -> str:
+    """Generate a deterministic low-token summary comparing recommendation to seed taste."""
+    seed_text = ", ".join(seed_artists[:2]) if seed_artists else "your input taste"
+    tag_text = ", ".join((tags or [])[:2]) if tags else "similar sonic palette"
+    if followers is None:
+        size_text = "still relatively under-the-radar"
+    elif followers < 10000:
+        size_text = "very underground on Spotify"
+    elif followers < 50000:
+        size_text = "small but growing on Spotify"
+    else:
+        size_text = "niche compared with mainstream acts"
+    return f"{artist_name} aligns with {seed_text} through {tag_text} and is {size_text}."
+
+
+def enrich_recommendations(
+    recs: List[Dict[str, Any]],
+    max_followers: int,
+    user_token: Optional[str] = None,
+    seed_artists: Optional[List[str]] = None,
+    target_count: int = 6,
+) -> List[Dict[str, Any]]:
+    """Pick up to target_count Spotify-verified artists under threshold, with adaptive fallback."""
     candidates = []
 
     for r in recs:
@@ -887,11 +908,11 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
         counts = get_artist_followers(name, user_token, spotify_id)
         verified_name = counts.get("spotify_verified_name") or name
         spotify_uri = counts.get("spotify_uri")
-
         if not spotify_uri:
             continue
 
         follower_count = get_best_follower_count(counts)
+        merged_tags = list(dict.fromkeys((r.get("tags") or []) + (counts.get("spotify_genres") or [])))[:4]
 
         top_tracks = []
         artist_id = spotify_uri.split(":")[-1] if spotify_uri else None
@@ -907,12 +928,13 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
         encoded_name = urllib.parse.quote_plus(verified_name)
         primary_url = f"https://www.last.fm/music/{encoded_name}" if LASTFM_KEY else f"https://open.spotify.com/artist/{artist_id}" if artist_id else f"https://www.youtube.com/results?search_query={encoded_name}"
         primary_url_label = "Last.fm" if LASTFM_KEY else "Spotify" if artist_id else "YouTube"
-        merged_tags = list(dict.fromkeys((r.get("tags") or []) + (counts.get("spotify_genres") or [])))[:4]
+
+        summary = build_comparative_summary(seed_artists or [], verified_name, merged_tags, follower_count)
 
         candidates.append({
             "artist": verified_name,
             "ai_suggested_name": name,
-            "explanation": r.get("explanation", ""),
+            "explanation": summary,
             "tags": merged_tags,
             "image": meta.get("image"),
             "sampleUrl": meta.get("sampleUrl"),
@@ -927,7 +949,7 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
             "followerSources": {
                 "spotify": counts.get("spotify"),
                 "youtube": counts.get("youtube"),
-                "lastfm": counts.get("lastfm")
+                "lastfm": counts.get("lastfm"),
             },
             "obscurityScore": calculate_obscurity_score(follower_count) if follower_count else None,
             "verified": True,
@@ -935,33 +957,31 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
             "confidence": "high" if counts.get("spotify_uri") and counts.get("lastfm") else "medium",
         })
 
-    def under_threshold(items, threshold):
-        return [x for x in items if (x.get("followers") is not None and x.get("followers") <= threshold)]
+    # sort by followers asc (unknown at end)
+    candidates.sort(key=lambda x: x.get("followers") if x.get("followers") is not None else 10**12)
 
-    strict = under_threshold(candidates, max_followers)
-    if len(strict) >= 5:
-        selected = strict
-        threshold_used = max_followers
-    else:
-        relaxed = under_threshold(candidates, max_followers * 3)
-        if len(relaxed) >= 5:
-            selected = relaxed
-            threshold_used = max_followers * 3
-        else:
-            # final fallback: include unknown follower counts and sort by lowest known
-            selected = sorted(candidates, key=lambda x: (x.get("followers") is None, x.get("followers") or 10**12))
-            threshold_used = None
+    # 1) strict quota
+    strict = [x for x in candidates if x.get("followers") is not None and x.get("followers") <= max_followers]
+    selected = strict[:target_count]
 
-    selected.sort(key=lambda x: x.get("followers") if x.get("followers") is not None else 10**12)
+    # 2) relaxed quota if needed
+    if len(selected) < target_count:
+        relaxed_limit = max_followers * 3
+        relaxed = [x for x in candidates if x not in selected and x.get("followers") is not None and x.get("followers") <= relaxed_limit]
+        selected.extend(relaxed[: target_count - len(selected)])
+
+    # 3) fill remaining with lowest verified regardless of followers
+    if len(selected) < target_count:
+        fillers = [x for x in candidates if x not in selected]
+        selected.extend(fillers[: target_count - len(selected)])
 
     print(f"\n=== Filtering Summary ===")
     print(f"Total recommendations: {len(recs)}")
     print(f"Spotify-verifiable candidates: {len(candidates)}")
     print(f"Strict threshold: {max_followers:,}")
-    print(f"Threshold used: {threshold_used if threshold_used is not None else 'adaptive-fallback'}")
-    print(f"Returning top {min(5, len(selected))} artists")
+    print(f"Returning top {len(selected)} artists")
 
-    return selected[:5]
+    return selected[:target_count]
 
 def calculate_obscurity_score(followers: int) -> int:
     """Calculate obscurity score (0-100, higher = more obscure)"""
@@ -998,21 +1018,16 @@ def analyze_artists(data: ArtistInput):
     # If seed graph returns nothing (common for vague text inputs), fall back to Spotify search discovery.
     if not base.get("recommendations"):
         base = get_spotify_search_recommendations(data.artists or [], level, data.spotify_token)
-
-    # Final fallback: use Gemini candidate generation, then Spotify verification in enrichment.
-    if not base.get("recommendations"):
-        base = ai_recommend(data.artists or [], level)
-
     tags = base.get("tags", [])
     recs = base.get("recommendations", [])
 
-    summary_map = summarize_spotify_recommendations(data.artists or [], recs)
-    for rec in recs:
-        name = rec.get("artist")
-        if name in summary_map:
-            rec["explanation"] = summary_map[name]
-
-    enriched = enrich_recommendations(recs, level_info["max_followers"], data.spotify_token)
+    enriched = enrich_recommendations(
+        recs,
+        level_info["max_followers"],
+        data.spotify_token,
+        seed_artists=data.artists or [],
+        target_count=6,
+    )
     
     return {
         "tags": tags,
