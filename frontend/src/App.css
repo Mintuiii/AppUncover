@@ -902,3 +902,34 @@ body {
   .search-input { font-size: 1.1rem; }
   .results-header { flex-direction: column; align-items: flex-start; gap: 8px; }
 }
+
+
+/* ─── Discovery Insight Strip ─────────────────────────────────────────── */
+.insight-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0 16px;
+}
+
+.insight-item {
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.insight-label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 0.62rem;
+  opacity: 0.6;
+}
+
+.insight-item strong {
+  font-size: 0.88rem;
+  margin-top: 2px;
+}

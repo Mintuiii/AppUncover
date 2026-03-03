@@ -176,12 +176,12 @@ const OBSCURITY_LEVELS = [
 ];
 
 const LOADING_STEPS = [
-  "Asking Gemini for obscure frequencies…",
-  "Verifying identities on Spotify…",
-  "Cross-checking Last.fm…",
-  "Filtering ghost artists…",
-  "Calculating obscurity scores…",
-  "Ranking by depth…",
+  "Reading your Spotify seeds…",
+  "Pulling Spotify recommendation graph…",
+  "Verifying artist identities…",
+  "Filtering by obscurity thresholds…",
+  "Collecting top tracks + previews…",
+  "Ranking by underground signal…",
 ];
 
 const PRESETS = [
@@ -442,7 +442,7 @@ export default function App() {
       setCurrentLevelInfo({ level: data.obscurity_level, max_followers: data.max_followers, description: data.description });
     } catch { setError("Could not fetch recommendations. Is the backend running?"); }
     finally { setLoading(false); }
-  }, [input, obscurityLevel, spotifyToken]);
+  }, [input, obscurityLevel, spotifyToken, suggestions]);
 
   const goDeeper = () => {
     const idx = OBSCURITY_LEVELS.findIndex(l => l.value === obscurityLevel);
@@ -634,6 +634,26 @@ export default function App() {
           ))}
         </div>
       </div>
+
+
+
+      {/* ── Discovery insight strip ─────────────────────────────────────── */}
+      {!isInitial && (
+        <div className="insight-strip">
+          <div className="insight-item">
+            <span className="insight-label">source</span>
+            <strong>{spotifyConnected ? "spotify-first" : "hybrid mode"}</strong>
+          </div>
+          <div className="insight-item">
+            <span className="insight-label">results</span>
+            <strong>{recs.length}</strong>
+          </div>
+          <div className="insight-item">
+            <span className="insight-label">playlist picks</span>
+            <strong>{playlist.length}</strong>
+          </div>
+        </div>
+      )}
 
       {/* ── Search bar ────────────────────────────────────────────────── */}
       <div className="search-bar">
