@@ -102,57 +102,65 @@ def get_spotify_client_token():
         pass
     return None
 
-def get_spotify_followers(artist_name: str, user_token: Optional[str] = None) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
+def get_spotify_followers(artist_name: str, user_token: Optional[str] = None, spotify_id: Optional[str] = None) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str], Optional[List[str]]]:
     """
-    Get follower count, Spotify URI, embed URL, and verified artist name from Spotify API
-    Returns: (follower_count, spotify_uri, embed_url, verified_name)
+    Get follower count, Spotify URI, embed URL, verified artist name and genres from Spotify API.
+    Returns: (follower_count, spotify_uri, embed_url, verified_name, genres)
     """
     token = user_token or _spotify_client_token or get_spotify_client_token()
     if not token:
-        return None, None, None, None
-    
+        return None, None, None, None, None
+
     try:
-        r = requests.get(
-            "https://api.spotify.com/v1/search",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"q": artist_name, "type": "artist", "limit": 5},  # Get top 5 for better matching
-            timeout=8
-        )
-        
-        if r.ok:
-            data = r.json()
-            artists = data.get("artists", {}).get("items", [])
-            if artists:
-                # Try to find exact or best match
-                best_match = None
-                exact_match = None
-                
-                for artist in artists:
-                    artist_spotify_name = artist.get("name", "").lower()
-                    search_name = artist_name.lower()
-                    
-                    # Exact match (case insensitive)
-                    if artist_spotify_name == search_name:
-                        exact_match = artist
-                        break
-                    
-                    # Best match (contains or very similar)
-                    if not best_match or artist_spotify_name.startswith(search_name):
-                        best_match = artist
-                
-                # Use exact match if found, otherwise best match, otherwise first result
-                selected_artist = exact_match or best_match or artists[0]
-                
-                followers = selected_artist.get("followers", {}).get("total", 0)
-                artist_id = selected_artist.get("id")
-                spotify_uri = selected_artist.get("uri")
-                verified_name = selected_artist.get("name")
-                embed_url = f"https://open.spotify.com/embed/artist/{artist_id}" if artist_id else None
-                
-                return followers, spotify_uri, embed_url, verified_name
+        selected_artist = None
+
+        if spotify_id:
+            by_id = requests.get(
+                f"https://api.spotify.com/v1/artists/{spotify_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=8,
+            )
+            if by_id.ok:
+                selected_artist = by_id.json()
+
+        if not selected_artist:
+            r = requests.get(
+                "https://api.spotify.com/v1/search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": artist_name, "type": "artist", "limit": 5},
+                timeout=8
+            )
+
+            if not r.ok:
+                return None, None, None, None, None
+
+            artists = r.json().get("artists", {}).get("items", [])
+            if not artists:
+                return None, None, None, None, None
+
+            best_match = None
+            exact_match = None
+            for artist in artists:
+                artist_spotify_name = artist.get("name", "").lower()
+                search_name = artist_name.lower()
+                if artist_spotify_name == search_name:
+                    exact_match = artist
+                    break
+                if not best_match or artist_spotify_name.startswith(search_name):
+                    best_match = artist
+            selected_artist = exact_match or best_match or artists[0]
+
+        followers = selected_artist.get("followers", {}).get("total", 0)
+        artist_id = selected_artist.get("id")
+        spotify_uri = selected_artist.get("uri")
+        verified_name = selected_artist.get("name")
+        genres = selected_artist.get("genres", [])
+        embed_url = f"https://open.spotify.com/embed/artist/{artist_id}" if artist_id else None
+
+        return followers, spotify_uri, embed_url, verified_name, genres
     except Exception as e:
         print(f"Spotify API error for {artist_name}: {e}")
-    return None, None, None, None
+    return None, None, None, None, None
 
 def get_spotify_top_tracks(artist_id: str, user_token: Optional[str] = None, market: str = "US") -> List[Dict[str, Any]]:
     """Get artist's top tracks from Spotify"""
@@ -259,7 +267,7 @@ def get_spotify_recommendations(
     obscurity_level: ObscurityLevel,
     user_token: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Generate recommendations directly from Spotify's recommendation graph."""
+    """Generate recommendations directly from Spotify's recommendation graph and verify with artist genres."""
     token = user_token or _spotify_client_token or get_spotify_client_token()
     if not token or not seed_artist_ids:
         return {"tags": [], "recommendations": []}
@@ -275,12 +283,25 @@ def get_spotify_recommendations(
     unique_ids = list(dict.fromkeys(seed_artist_ids))[:5]
 
     try:
+        # Build seed genre profile
+        seed_genres: List[str] = []
+        seed_artists_r = requests.get(
+            "https://api.spotify.com/v1/artists",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"ids": ",".join(unique_ids)},
+            timeout=10,
+        )
+        if seed_artists_r.ok:
+            for a in seed_artists_r.json().get("artists", []):
+                seed_genres.extend(a.get("genres", [])[:3])
+        seed_genres = list(dict.fromkeys(seed_genres))
+
         r = requests.get(
             "https://api.spotify.com/v1/recommendations",
             headers={"Authorization": f"Bearer {token}"},
             params={
                 "seed_artists": ",".join(unique_ids),
-                "limit": 80,
+                "limit": 100,
                 "max_popularity": popularity_ceiling,
                 "min_popularity": 5,
             },
@@ -288,43 +309,65 @@ def get_spotify_recommendations(
         )
 
         if not r.ok:
-            return {"tags": [], "recommendations": []}
+            return {"tags": seed_genres[:8], "recommendations": []}
 
         track_items = r.json().get("tracks", [])
-        artist_bucket: Dict[str, Dict[str, Any]] = {}
-
+        candidate_ids: List[str] = []
         for track in track_items:
             for artist in track.get("artists", []):
                 aid = artist.get("id")
-                name = artist.get("name")
-                if not aid or not name:
-                    continue
-                if aid not in artist_bucket:
-                    artist_bucket[aid] = {
-                        "artist": name,
-                        "spotify_id": aid,
-                        "explanation": "Matched by Spotify's recommendation graph from your seed artists.",
-                        "tags": [],
-                    }
+                if aid and aid not in unique_ids:
+                    candidate_ids.append(aid)
 
-        tags = []
-        for artist_id in unique_ids:
-            detail_r = requests.get(
-                f"https://api.spotify.com/v1/artists/{artist_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=8,
-            )
-            if detail_r.ok:
-                tags.extend(detail_r.json().get("genres", [])[:2])
+        candidate_ids = list(dict.fromkeys(candidate_ids))[:50]
+        if not candidate_ids:
+            return {"tags": seed_genres[:8], "recommendations": []}
+
+        details_r = requests.get(
+            "https://api.spotify.com/v1/artists",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"ids": ",".join(candidate_ids)},
+            timeout=10,
+        )
+        if not details_r.ok:
+            return {"tags": seed_genres[:8], "recommendations": []}
+
+        recommendations: List[Dict[str, Any]] = []
+        for artist in details_r.json().get("artists", []):
+            if not artist:
+                continue
+            artist_popularity = artist.get("popularity", 100)
+            if artist_popularity > popularity_ceiling:
+                continue
+
+            artist_genres = artist.get("genres", [])
+            has_genre_overlap = bool(set(g.lower() for g in artist_genres) & set(g.lower() for g in seed_genres)) if seed_genres else True
+            if seed_genres and not has_genre_overlap:
+                continue
+
+            aid = artist.get("id")
+            name = artist.get("name")
+            if not aid or not name:
+                continue
+
+            overlap = [g for g in artist_genres if g.lower() in {sg.lower() for sg in seed_genres}]
+            explanation = "Matched on Spotify recommendation graph"
+            if overlap:
+                explanation += f" + shared genres: {', '.join(overlap[:2])}"
+            recommendations.append({
+                "artist": name,
+                "spotify_id": aid,
+                "explanation": explanation + ".",
+                "tags": (overlap[:2] or artist_genres[:2]),
+            })
 
         return {
-            "tags": list(dict.fromkeys(tags))[:8],
-            "recommendations": list(artist_bucket.values())[:20],
+            "tags": seed_genres[:8],
+            "recommendations": recommendations[:20],
         }
     except Exception as e:
         print(f"Spotify recommendation error: {e}")
         return {"tags": [], "recommendations": []}
-
 
 
 def resolve_spotify_artist_ids(artist_names: List[str], user_token: Optional[str] = None) -> List[str]:
@@ -453,20 +496,21 @@ def get_lastfm_listeners(artist_name: str) -> Optional[int]:
         pass
     return None
 
-def get_artist_followers(artist_name: str, user_token: Optional[str] = None) -> Dict[str, Any]:
+def get_artist_followers(artist_name: str, user_token: Optional[str] = None, spotify_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Get follower/subscriber counts and URLs from multiple sources
-    Returns dict with counts, URLs, and verified name from each source
+    Get follower/subscriber counts and URLs from multiple sources.
+    If spotify_id is provided, Spotify lookup is exact by ID (prevents wrong-artist matching).
     """
-    spotify_followers, spotify_uri, spotify_embed, spotify_verified_name = get_spotify_followers(artist_name, user_token)
-    youtube_subs, youtube_url = get_youtube_subscribers(artist_name)
-    lastfm = get_lastfm_listeners(artist_name)
-    
+    spotify_followers, spotify_uri, spotify_embed, spotify_verified_name, spotify_genres = get_spotify_followers(artist_name, user_token, spotify_id)
+    youtube_subs, youtube_url = get_youtube_subscribers(spotify_verified_name or artist_name)
+    lastfm = get_lastfm_listeners(spotify_verified_name or artist_name)
+
     return {
         "spotify": spotify_followers,
         "spotify_uri": spotify_uri,
         "spotify_embed": spotify_embed,
         "spotify_verified_name": spotify_verified_name,
+        "spotify_genres": spotify_genres or [],
         "youtube": youtube_subs,
         "youtube_url": youtube_url,
         "lastfm": lastfm
@@ -727,64 +771,46 @@ def fallback_lastfm_image(artist_name: str) -> str | None:
 
 def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_token: Optional[str] = None) -> List[Dict[str, Any]]:
     enriched = []
-    skipped_artists = []  # Track artists that were filtered out
-    
+    skipped_artists = []
+
     for r in recs:
         name = r.get("artist", "")
-        
-        # Get follower/listener counts from all sources
-        counts = get_artist_followers(name, user_token)
+        spotify_id = r.get("spotify_id")
+
+        counts = get_artist_followers(name, user_token, spotify_id)
         follower_count = get_best_follower_count(counts)
-        
-        # Use Spotify verified name if available, otherwise use AI suggested name
         verified_name = counts.get("spotify_verified_name") or name
-        
-        # Skip if over the limit (with some logging)
+
         if follower_count and follower_count > max_followers:
-            skipped_artists.append({
-                "ai_name": name,
-                "verified_name": verified_name,
-                "followers": follower_count
-            })
-            print(f"Filtered out: {name} (verified as {verified_name}) with {follower_count:,} followers (max: {max_followers:,})")
+            skipped_artists.append({"name": verified_name, "followers": follower_count})
             continue
-        
-        # Skip if artist not found on any platform
-        if not follower_count and not counts.get("spotify_uri"):
-            print(f"Warning: Could not verify artist '{name}' on any platform")
+
+        if not counts.get("spotify_uri"):
+            # Super Spotify-first: reject non-Spotify verifiable entries.
             continue
-        
-        # Get top tracks if we have Spotify data
+
         top_tracks = []
-        if counts.get("spotify_uri"):
-            artist_id = counts["spotify_uri"].split(":")[-1] if counts["spotify_uri"] else None
-            if artist_id:
-                top_tracks = get_spotify_top_tracks(artist_id, user_token)
-        
+        artist_id = counts["spotify_uri"].split(":")[-1] if counts.get("spotify_uri") else None
+        if artist_id:
+            top_tracks = get_spotify_top_tracks(artist_id, user_token)
+
         meta = enrich_with_itunes(verified_name)
         if not meta.get("image"):
             lf_img = fallback_lastfm_image(verified_name)
             if lf_img:
                 meta["image"] = lf_img
-        
+
         encoded_name = urllib.parse.quote_plus(verified_name)
-        
-        # Determine which link to use: Last.fm or YouTube
-        if LASTFM_KEY:
-            primary_url = f"https://www.last.fm/music/{encoded_name}"
-            primary_url_label = "Last.fm"
-        elif counts.get("youtube_url"):
-            primary_url = counts["youtube_url"]
-            primary_url_label = "YouTube"
-        else:
-            primary_url = f"https://www.youtube.com/results?search_query={encoded_name}"
-            primary_url_label = "YouTube"
+        primary_url = f"https://www.last.fm/music/{encoded_name}" if LASTFM_KEY else f"https://open.spotify.com/artist/{artist_id}" if artist_id else f"https://www.youtube.com/results?search_query={encoded_name}"
+        primary_url_label = "Last.fm" if LASTFM_KEY else "Spotify" if artist_id else "YouTube"
+
+        merged_tags = list(dict.fromkeys((r.get("tags") or []) + (counts.get("spotify_genres") or [])))[:4]
 
         enriched.append({
-            "artist": verified_name,  # Use verified name from Spotify
-            "ai_suggested_name": name,  # Keep original AI suggestion for reference
+            "artist": verified_name,
+            "ai_suggested_name": name,
             "explanation": r.get("explanation", ""),
-            "tags": r.get("tags", []),
+            "tags": merged_tags,
             "image": meta.get("image"),
             "sampleUrl": meta.get("sampleUrl"),
             "sampleTrack": meta.get("sampleTrack"),
@@ -801,19 +827,19 @@ def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_
                 "lastfm": counts.get("lastfm")
             },
             "obscurityScore": calculate_obscurity_score(follower_count) if follower_count else None,
-            "verified": bool(counts.get("spotify_uri"))  # Flag if we found them on Spotify
+            "verified": bool(counts.get("spotify_uri")),
+            "spotifyVerified": bool(counts.get("spotify_uri")),
+            "confidence": "high" if counts.get("spotify_uri") and counts.get("lastfm") else "medium" if counts.get("spotify_uri") else "low",
         })
-    
-    # Sort by obscurity (fewer followers first)
+
     enriched.sort(key=lambda x: x.get("followers") or 0)
-    
-    # Log summary
+
     print(f"\n=== Filtering Summary ===")
-    print(f"Total AI recommendations: {len(recs)}")
-    print(f"Passed filter: {len(enriched)}")
+    print(f"Total recommendations: {len(recs)}")
+    print(f"Passed Spotify verification: {len(enriched)}")
     print(f"Filtered out (too popular): {len(skipped_artists)}")
     print(f"Returning top {min(5, len(enriched))} artists")
-    
+
     return enriched[:5]
 
 def calculate_obscurity_score(followers: int) -> int:
@@ -843,10 +869,8 @@ def analyze_artists(data: ArtistInput):
     if not seed_ids:
         seed_ids = resolve_spotify_artist_ids(data.artists or [], data.spotify_token)
 
-    # Spotify-first: only call Gemini when Spotify recommendations are unavailable.
+    # Strict Spotify mode: recommendations come from Spotify graph + genre overlap checks only.
     base = get_spotify_recommendations(seed_ids, level, data.spotify_token) if seed_ids else {"tags": [], "recommendations": []}
-    if not base.get("recommendations"):
-        base = ai_recommend(data.artists or [], level)
     tags = base.get("tags", [])
     recs = base.get("recommendations", [])
     
