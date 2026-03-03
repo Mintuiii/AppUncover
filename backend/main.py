@@ -409,11 +409,17 @@ def analyze_artists(data: ArtistInput):
     token = get_token(data.spotify_token)
     print(f"token={'yes' if token else 'NO'}")
 
-    # --- Step 1: top artists + genres from Spotify (parallel) ---
-    top_artists: List[str] = [h["name"] for h in (data.spotify_hints or []) if h.get("name")]
+    # --- Step 1: seed artists + optional Spotify personalization ---
+    input_artists = [a.strip() for a in (data.artists or []) if a and a.strip()]
+    top_artists: List[str] = list(dict.fromkeys(input_artists + [h["name"] for h in (data.spotify_hints or []) if h.get("name")]))
     top_genres:  List[str] = []
 
-    if data.spotify_token:
+    for hint in (data.spotify_hints or []):
+        top_genres.extend((hint.get("genres") or [])[:2])
+
+    # If the user gave explicit artists, keep discovery anchored to that input.
+    # Only pull account-wide top artists when there is no direct input.
+    if data.spotify_token and not input_artists:
         def fetch_range(time_range):
             r = requests.get("https://api.spotify.com/v1/me/top/artists",
                 headers={"Authorization": f"Bearer {data.spotify_token}"},
@@ -431,7 +437,7 @@ def analyze_artists(data: ArtistInput):
             print(f"[top_artists] error: {e}")
 
     top_genres = list(dict.fromkeys(top_genres))
-    print(f"top_artists={top_artists[:5]} top_genres={top_genres[:5]}")
+    print(f"seed_artists={top_artists[:5]} top_genres={top_genres[:5]}")
 
     # --- Step 2: derive search tags ---
     search_tags = derive_search_tags(data.artists or [], top_artists[:8], top_genres[:8])
@@ -441,10 +447,11 @@ def analyze_artists(data: ArtistInput):
 
     # --- Step 3: discover candidates via Last.fm (parallel) ---
     candidate_names: Dict[str, None] = {}
-    seed_lower = {n.lower() for n in top_artists}
+    discovery_seeds = top_artists[:5]
+    seed_lower = {n.lower() for n in discovery_seeds}
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        for names in ex.map(lambda a: lastfm_similar_artists(a, 50), top_artists[:5]):
+        for names in ex.map(lambda a: lastfm_similar_artists(a, 50), discovery_seeds):
             for name in names:
                 if name.lower() not in seed_lower:
                     candidate_names[name] = None
@@ -466,7 +473,7 @@ def analyze_artists(data: ArtistInput):
                 "obscurity_level": level, "max_followers": max_fol, "description": cfg["description"]}
 
     # --- Step 3b: language detection ---
-    seed_language = detect_seed_language(top_artists[:5], top_genres[:10]) if top_artists else None
+    seed_language = detect_seed_language(discovery_seeds, top_genres[:10]) if discovery_seeds else None
 
     # --- Step 4: parallel candidate verification ---
     names_list = list(candidate_names.keys())[:60]

@@ -364,13 +364,9 @@ export default function App() {
     setSavingPlaylist(true);
     setPlaylistSaved(null);
 
-    // Always try to refresh first so we don't hit an expired token
-    const refreshed = await refreshSpotifyToken();
-    const token = refreshed || spotifyToken;
-
     const artist_ids = playlist.map(a => {
       if (a.spotifyUri) return a.spotifyUri.split(":").pop();
-      if (a.spotifyUrl) return a.spotifyUrl.split("/").pop();
+      if (a.spotifyUrl) return a.spotifyUrl.split("/").pop()?.split("?")[0];
       return null;
     }).filter(Boolean);
 
@@ -380,15 +376,28 @@ export default function App() {
       return;
     }
 
-    try {
+    const trySave = async (tokenToUse) => {
       const res = await fetch("http://127.0.0.1:8000/spotify/save-playlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, artist_ids, name: `Uncover: ${input || "discoveries"}` }),
+        body: JSON.stringify({ token: tokenToUse, artist_ids, name: `Uncover: ${input || "discoveries"}` }),
       });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      let url = data.playlist_url;
+      return res.json();
+    };
+
+    try {
+      // Try a refreshed token first, then fallback to current token.
+      const refreshed = await refreshSpotifyToken();
+      let data = await trySave(refreshed || spotifyToken);
+
+      // If Spotify reports an invalid token, refresh once and retry.
+      if (data?.error === "invalid token") {
+        const retryToken = await refreshSpotifyToken();
+        if (retryToken) data = await trySave(retryToken);
+      }
+
+      if (data?.error) throw new Error(data.error);
+      let url = data?.playlist_url;
       if (url?.startsWith("spotify:playlist:")) {
         url = `https://open.spotify.com/playlist/${url.split(":").pop()}`;
       }
