@@ -267,7 +267,7 @@ def get_spotify_recommendations(
     obscurity_level: ObscurityLevel,
     user_token: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Generate recommendations directly from Spotify's recommendation graph and verify with artist genres."""
+    """Generate recommendations from Spotify graph, ranking by genre overlap instead of hard-dropping."""
     token = user_token or _spotify_client_token or get_spotify_client_token()
     if not token or not seed_artist_ids:
         return {"tags": [], "recommendations": []}
@@ -283,7 +283,6 @@ def get_spotify_recommendations(
     unique_ids = list(dict.fromkeys(seed_artist_ids))[:5]
 
     try:
-        # Build seed genre profile
         seed_genres: List[str] = []
         seed_artists_r = requests.get(
             "https://api.spotify.com/v1/artists",
@@ -295,6 +294,7 @@ def get_spotify_recommendations(
             for a in seed_artists_r.json().get("artists", []):
                 seed_genres.extend(a.get("genres", [])[:3])
         seed_genres = list(dict.fromkeys(seed_genres))
+        seed_genre_set = {g.lower() for g in seed_genres}
 
         r = requests.get(
             "https://api.spotify.com/v1/recommendations",
@@ -303,7 +303,7 @@ def get_spotify_recommendations(
                 "seed_artists": ",".join(unique_ids),
                 "limit": 100,
                 "max_popularity": popularity_ceiling,
-                "min_popularity": 5,
+                "min_popularity": 0,
             },
             timeout=10,
         )
@@ -311,15 +311,14 @@ def get_spotify_recommendations(
         if not r.ok:
             return {"tags": seed_genres[:8], "recommendations": []}
 
-        track_items = r.json().get("tracks", [])
         candidate_ids: List[str] = []
-        for track in track_items:
+        for track in r.json().get("tracks", []):
             for artist in track.get("artists", []):
                 aid = artist.get("id")
                 if aid and aid not in unique_ids:
                     candidate_ids.append(aid)
 
-        candidate_ids = list(dict.fromkeys(candidate_ids))[:50]
+        candidate_ids = list(dict.fromkeys(candidate_ids))[:60]
         if not candidate_ids:
             return {"tags": seed_genres[:8], "recommendations": []}
 
@@ -332,17 +331,13 @@ def get_spotify_recommendations(
         if not details_r.ok:
             return {"tags": seed_genres[:8], "recommendations": []}
 
-        recommendations: List[Dict[str, Any]] = []
+        ranked: List[tuple[int, Dict[str, Any]]] = []
         for artist in details_r.json().get("artists", []):
             if not artist:
                 continue
-            artist_popularity = artist.get("popularity", 100)
-            if artist_popularity > popularity_ceiling:
-                continue
 
-            artist_genres = artist.get("genres", [])
-            has_genre_overlap = bool(set(g.lower() for g in artist_genres) & set(g.lower() for g in seed_genres)) if seed_genres else True
-            if seed_genres and not has_genre_overlap:
+            pop = artist.get("popularity", 100)
+            if pop > popularity_ceiling:
                 continue
 
             aid = artist.get("id")
@@ -350,16 +345,23 @@ def get_spotify_recommendations(
             if not aid or not name:
                 continue
 
-            overlap = [g for g in artist_genres if g.lower() in {sg.lower() for sg in seed_genres}]
+            artist_genres = artist.get("genres", [])
+            overlap = [g for g in artist_genres if g.lower() in seed_genre_set]
+            score = len(overlap)
+
             explanation = "Matched on Spotify recommendation graph"
             if overlap:
                 explanation += f" + shared genres: {', '.join(overlap[:2])}"
-            recommendations.append({
+
+            ranked.append((score, {
                 "artist": name,
                 "spotify_id": aid,
                 "explanation": explanation + ".",
-                "tags": (overlap[:2] or artist_genres[:2]),
-            })
+                "tags": (overlap[:2] or artist_genres[:2] or seed_genres[:2]),
+            }))
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        recommendations = [item for _, item in ranked]
 
         return {
             "tags": seed_genres[:8],
@@ -395,6 +397,18 @@ def resolve_spotify_artist_ids(artist_names: List[str], user_token: Optional[str
             continue
 
     return list(dict.fromkeys(resolved))[:5]
+
+
+def get_fallback_seed_artist_ids(user_token: Optional[str]) -> List[str]:
+    """Fallback seeds from the connected Spotify account when text terms aren't artists."""
+    if not user_token:
+        return []
+    try:
+        details = get_user_top_artists_details(user_token, "short_term", 8)
+        ids = [a.get("id") for a in details if a.get("id")]
+        return list(dict.fromkeys(ids))[:5]
+    except Exception:
+        return []
 
 
 def get_gemini_model_client():
@@ -769,6 +783,36 @@ def fallback_lastfm_image(artist_name: str) -> str | None:
         pass
     return None
 
+def summarize_spotify_recommendations(seed_artists: List[str], recommendations: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Use Gemini only to write short summaries for already-verified Spotify artists."""
+    model = get_gemini_model_client()
+    if not model or not recommendations:
+        return {}
+
+    artist_names = [r.get("artist") for r in recommendations if r.get("artist")][:8]
+    if not artist_names:
+        return {}
+
+    prompt = f"""
+    You are given Spotify-verified artist recommendations.
+    Seed artists/vibes: {', '.join(seed_artists)}
+    Recommended artists: {', '.join(artist_names)}
+
+    Write one concise sentence for each recommended artist explaining why it fits.
+    IMPORTANT:
+    - Use ONLY the provided recommended artist names
+    - Do not add new artists
+    - Return strict JSON object mapping artist name -> explanation sentence
+    """
+
+    try:
+        resp = model.generate_content(prompt)
+        parsed = json.loads(resp.text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 def enrich_recommendations(recs: List[Dict[str, Any]], max_followers: int, user_token: Optional[str] = None) -> List[Dict[str, Any]]:
     enriched = []
     skipped_artists = []
@@ -868,12 +912,20 @@ def analyze_artists(data: ArtistInput):
     seed_ids = [hint.get("id") for hint in (data.spotify_hints or []) if hint.get("id")]
     if not seed_ids:
         seed_ids = resolve_spotify_artist_ids(data.artists or [], data.spotify_token)
+    if not seed_ids:
+        seed_ids = get_fallback_seed_artist_ids(data.spotify_token)
 
-    # Strict Spotify mode: recommendations come from Spotify graph + genre overlap checks only.
+    # Strict Spotify retrieval mode; Gemini is used only for optional summaries.
     base = get_spotify_recommendations(seed_ids, level, data.spotify_token) if seed_ids else {"tags": [], "recommendations": []}
     tags = base.get("tags", [])
     recs = base.get("recommendations", [])
-    
+
+    summary_map = summarize_spotify_recommendations(data.artists or [], recs)
+    for rec in recs:
+        name = rec.get("artist")
+        if name in summary_map:
+            rec["explanation"] = summary_map[name]
+
     enriched = enrich_recommendations(recs, level_info["max_followers"], data.spotify_token)
     
     return {
