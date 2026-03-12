@@ -1,93 +1,71 @@
-# 🎧 Uncover
 
-An AI-powered music discovery tool designed to dig deep and find **underground, obscure, and niche** artists based on your personal taste. 
+# 🎧 Uncover (v0.8)
 
-Built with a sleek, minimalist purple interface, this app uses Google Gemini AI to analyze your vibe and Last.fm/iTunes to let you preview the music instantly.
+**Uncover** is a high-fidelity music discovery engine designed to bypass mainstream algorithms. Unlike standard recommendation tools, Uncover uses a "depth-first" search approach to find underground, obscure, and niche artists based on your specific "vibe".
 
-## ✨ Features
+## ✨ Key Enhancements in 0.8
 
-* **Deep Cuts Only:** The AI is specifically prompted to recommend "VERY small, niche, or underground artists," helping you break out of the mainstream algorithm bubble.
-* **Vibe Analysis:** Generates descriptive tags (e.g., "lo-fi jazz", "dream pop", "melancholy") to describe your specific taste profile.
-* **Custom Audio Player:** A clean, custom-built minimalist player to preview 30-second clips of recommended artists.
-* **Last.fm Integration:** Direct links to artist pages on Last.fm for deep diving into discographies.
-* **Minimalist Purple UI:** A dark, immersive design focused on the content without clutter.
+* **Algorithmic Depth Control:** A new "Obscurity Slider" allows you to toggle between five levels of discovery—from "Niche" (up to 500k followers) down to "Ultra Deep" (less than 1,000 followers).
+* **Hybrid Intelligence:** The app now integrates directly with **Spotify** and **Last.fm** to cross-reference listener counts and popularity scores, ensuring recommendations are truly underground.
+* **Dynamic UI Personalization:** A built-in theme engine allows you to customize the entire interface's "vibe color" using an RGB picker.
+* **Spotify Ecosystem Integration:** Connect your Spotify account to seed recommendations from your library and save your discoveries directly to a generated "Uncover" playlist.
 
 ## 🛠️ Tech Stack
 
 **Frontend:**
-* React.js
-* Custom CSS (Purple Dark Mode)
+
+* **React 19:** Utilizing advanced hooks for waveform audio synchronization and theme generation.
+* **Custom CSS Variables:** Dynamic layout that adapts colors based on user input.
 
 **Backend:**
-* Python (FastAPI)
-* Google Gemini AI (Text Generation)
-* iTunes Search API (Audio Previews & Artwork)
-* Last.fm API (Additional Metadata)
 
-## 🚀 Getting Started
+* **FastAPI (Python):** High-performance asynchronous API handling.
+* **Multi-API Orchestration:** Parallel processing of data from Spotify (Web API), Last.fm, and iTunes Search.
+* **Statistical Ranking:** A custom bell-curve obscurity scoring system based on Last.fm listener data.
 
-### 1. Backend Setup
+## 🚀 Setup & Installation
 
-Navigate to the backend directory and set up the Python environment.
+### 1. Environment Configuration
 
-1.  **Navigate to the folder:**
-    ```bash
-    cd backend
-    ```
+Create a `.env` file in the `backend/` directory with the following credentials:
 
-2.  **Create a virtual environment (optional but recommended):**
-    ```bash
-    python -m venv venv
-    # Windows
-    venv\Scripts\activate
-    # Mac/Linux
-    source venv/bin/activate
-    ```
+```env
+LASTFM_API_KEY="your_lastfm_key"
+SPOTIFY_CLIENT_ID="your_spotify_id"
+SPOTIFY_CLIENT_SECRET="your_spotify_secret"
+SPOTIFY_REDIRECT_URI="http://127.0.0.1:3000/callback"
 
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+```
 
-4.  **Configure Environment Variables:**
-    Create a file named `.env` in the `backend/` folder and add your API keys:
-    ```env
-    GEMINI_API_KEY="your_actual_gemini_key_here"
-    # Optional: Add Last.fm key if you want better artist images
-    LASTFM_API_KEY="your_lastfm_key_here"
-    ```
+### 2. Backend Setup
 
-5.  **Run the Server:**
-    ```bash
-    uvicorn main:app --reload
-    ```
-    The backend will start at `http://127.0.0.1:8000`. You can check `http://127.0.0.1:8000/health` to confirm it is running.
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate # or venv\Scripts\activate on Windows
+pip install -r requirements.txt
+uvicorn main:app --reload
 
----
+```
 
-### 2. Frontend Setup
+### 3. Frontend Setup
 
-1.  Navigate to the frontend:
-    ```bash
-    cd frontend
-    ```
-2.  Install Node dependencies:
-    ```bash
-    npm install
-    ```
-3.  Start the React app:
-    ```bash
-    npm start
-    ```
+```bash
+cd frontend
+npm install
+npm start
 
-## 🎮 How It Works
+```
 
-1.  **Type Artists:** Enter a few artists you like (e.g., "Nujabes, MF DOOM").
-2.  **Analyze:** The backend sends this list to Google Gemini with a prompt specifically requesting **obscure** recommendations.
-3.  **Discover:** The app displays:
-    * Global "Vibe Tags".
-    * 5 Underground Artist Cards.
-    * Each card contains artwork, specific tags, a Play button for a snippet, and a link to Last.fm.
+## 🎮 How to Discover
+
+1. **Seed the Vibe:** Enter artists, genres, or moods (e.g., "Japanese Jazz, 90s Memphis Rap").
+2. **Select Your Depth:** Use the slider to choose how "deep" into the underground you want to go.
+3. **Preview & Verify:** * Click the **Play** button to hear a 30-second snippet.
+* Check the **Obscurity Ring** to see the artist's underground score (0–100).
+
+
+4. **Curate:** Heart your favorite finds to add them to your discovery drawer, then save the entire batch to Spotify.
 
 ## 📄 License
 
