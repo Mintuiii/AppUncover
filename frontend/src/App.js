@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import "./App.css";
 
 // ─── Waveform Player ─────────────────────────────────────────────────────────
@@ -49,10 +49,7 @@ const WaveformPlayer = ({ src, isGlobalPlaying, onPlay }) => {
           const filled = (i / bars) < progress;
           return (
             <div key={i} className={`waveform-bar ${filled ? "filled" : ""} ${isPlaying ? "animating" : ""}`}
-              style={{
-                height: `${height}%`,
-                animationDelay: `${i * 40}ms`,
-              }}
+              style={{ height: `${height}%`, animationDelay: `${i * 40}ms` }}
             />
           );
         })}
@@ -87,7 +84,6 @@ const ObscurityRing = ({ score }) => {
 
 // ─── Signal Strength Bars ────────────────────────────────────────────────────
 const SignalBars = ({ score }) => {
-  // 4 bars, filled based on how obscure (higher score = more filled)
   const filled = Math.ceil((score / 100) * 4);
   return (
     <div className="signal-bars" title={`Signal strength: ${score}/100`}>
@@ -213,6 +209,259 @@ const RANDOM_SEEDS = [
   "Indonesian Krautrock", "Malian Blues",
 ];
 
+const TAG_COLORS = [
+  { bg: "rgba(118,75,162,0.18)", border: "rgba(118,75,162,0.55)", text: "#c49dff" },
+  { bg: "rgba(220,38,127,0.15)", border: "rgba(220,38,127,0.5)",  text: "#f472b6" },
+  { bg: "rgba(37,99,235,0.18)",  border: "rgba(37,99,235,0.5)",   text: "#93c5fd" },
+  { bg: "rgba(16,185,129,0.15)", border: "rgba(16,185,129,0.5)",  text: "#6ee7b7" },
+  { bg: "rgba(245,158,11,0.15)", border: "rgba(245,158,11,0.5)",  text: "#fcd34d" },
+  { bg: "rgba(239,68,68,0.15)",  border: "rgba(239,68,68,0.5)",   text: "#fca5a5" },
+  { bg: "rgba(20,184,166,0.15)", border: "rgba(20,184,166,0.5)",  text: "#5eead4" },
+  { bg: "rgba(168,85,247,0.15)", border: "rgba(168,85,247,0.5)",  text: "#d8b4fe" },
+];
+
+const STAR_RATINGS = ["", "★", "★★", "★★★", "★★★★", "★★★★★"];
+
+// ─── Genre Mood Board ─────────────────────────────────────────────────────────
+const GenreMoodBoard = ({ tags, onTagClick }) => {
+  if (!tags || tags.length === 0) return null;
+
+  const shuffled = useMemo(() => {
+    const weighted = tags.map((tag, i) => ({
+      tag,
+      tier: i < 2 ? 3 : i < 5 ? 2 : 1,
+      color: TAG_COLORS[i % TAG_COLORS.length],
+    }));
+    return [...weighted].sort((a, b) => {
+      const seed = (a.tag.charCodeAt(0) + b.tag.charCodeAt(0)) % 3;
+      return seed - 1;
+    });
+  }, [tags]); // eslint-disable-line
+
+  return (
+    <div className="mood-board">
+      <div className="mood-board-header">
+        <span className="section-label">🎨 vibe map</span>
+        <span className="mood-board-hint">tap to explore</span>
+      </div>
+      <div className="mood-cloud">
+        {shuffled.map(({ tag, tier, color }, i) => (
+          <button
+            key={tag}
+            className={`mood-tag mood-tag-tier${tier}`}
+            style={{
+              background: color.bg,
+              borderColor: color.border,
+              color: color.text,
+              animationDelay: `${i * 60}ms`,
+            }}
+            onClick={() => onTagClick(tag)}
+            title={`Search for "${tag}"`}
+          >
+            {tag}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ─── Artist Notes Panel ──────────────────────────────────────────────────────
+const ArtistNotes = ({ artistName, notes, setNotes, rating, setRating }) => {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(notes || "");
+  const taRef = useRef(null);
+
+  useEffect(() => {
+    setDraft(notes || "");
+  }, [notes]);
+
+  const save = () => {
+    setNotes(draft);
+    setEditing(false);
+  };
+
+  useEffect(() => {
+    if (editing && taRef.current) taRef.current.focus();
+  }, [editing]);
+
+  return (
+    <div className="artist-notes">
+      <div className="notes-header">
+        <span className="notes-label">my notes</span>
+        <div className="star-rating">
+          {[1,2,3,4,5].map(n => (
+            <button
+              key={n}
+              className={`star-btn ${n <= rating ? "filled" : ""}`}
+              onClick={() => setRating(rating === n ? 0 : n)}
+              title={`Rate ${n} star${n > 1 ? "s" : ""}`}
+            >★</button>
+          ))}
+        </div>
+      </div>
+      {editing ? (
+        <div className="notes-edit">
+          <textarea
+            ref={taRef}
+            className="notes-textarea"
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            placeholder="What do you think? First impressions, where you heard them, similar artists…"
+            rows={3}
+          />
+          <div className="notes-actions">
+            <button className="notes-btn notes-save" onClick={save}>save</button>
+            <button className="notes-btn notes-cancel" onClick={() => { setDraft(notes || ""); setEditing(false); }}>cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div className="notes-display" onClick={() => setEditing(true)}>
+          {notes
+            ? <p className="notes-text">{notes}</p>
+            : <p className="notes-placeholder">+ add a note…</p>
+          }
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Share Card (canvas-based image export) ──────────────────────────────────
+const polyfillRoundRect = (ctx) => {
+  if (ctx.roundRect) return;
+  ctx.roundRect = function(x, y, w, h, r) {
+    const radius = Array.isArray(r) ? r[0] : (r || 0);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+    ctx.lineTo(x + radius, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+  };
+};
+
+const useShareCard = () => {
+  const generate = useCallback(async (artist, accentRgb) => {
+    const W = 800, H = 420;
+    const canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d");
+
+    polyfillRoundRect(ctx);
+
+    const [r, g, b] = accentRgb.split(",").map(Number);
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, `rgb(${Math.max(r-80,0)},${Math.max(g-80,0)},${Math.max(b-80,0)})`);
+    grad.addColorStop(1, "#0a0a0a");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = `rgba(${r},${g},${b},0.3)`;
+    ctx.fillRect(0, 0, 6, H);
+
+    let imgLoaded = false;
+    if (artist.image) {
+      try {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        await new Promise((res, rej) => {
+          img.onload = res; img.onerror = rej;
+          img.src = artist.image;
+          setTimeout(rej, 3000);
+        });
+        ctx.save();
+        ctx.globalAlpha = 0.12;
+        ctx.drawImage(img, W - 340, 0, 340, H);
+        ctx.restore();
+        ctx.save();
+        const iSize = 160;
+        const ix = W - iSize - 48, iy = (H - iSize) / 2;
+        ctx.beginPath();
+        ctx.roundRect(ix, iy, iSize, iSize, 12);
+        ctx.clip();
+        ctx.drawImage(img, ix, iy, iSize, iSize);
+        ctx.restore();
+        imgLoaded = true;
+      } catch {}
+    }
+
+    ctx.font = "bold 13px monospace";
+    ctx.fillStyle = `rgba(${r},${g},${b},0.9)`;
+    ctx.fillText("UN", 32, 44);
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.fillText("COVER", 32 + ctx.measureText("UN").width, 44);
+
+    ctx.font = "bold 52px sans-serif";
+    ctx.fillStyle = "#ffffff";
+    const maxW = imgLoaded ? W - 260 : W - 80;
+    let name = artist.artist;
+    while (ctx.measureText(name).width > maxW - 32 && name.length > 3) {
+      name = name.slice(0, -1);
+    }
+    if (name !== artist.artist) name += "…";
+    ctx.fillText(name, 32, H / 2 - 20);
+
+    if (artist.tags?.length) {
+      ctx.font = "12px monospace";
+      let tx = 32;
+      const ty = H / 2 + 18;
+      artist.tags.slice(0, 4).forEach(tag => {
+        const tw = ctx.measureText(tag).width + 24;
+        if (tx + tw > maxW) return;
+        ctx.fillStyle = `rgba(${r},${g},${b},0.25)`;
+        ctx.beginPath();
+        ctx.roundRect(tx, ty - 14, tw, 22, 11);
+        ctx.fill();
+        ctx.fillStyle = `rgba(${r},${g},${b},1)`;
+        ctx.fillText(tag, tx + 12, ty + 2);
+        tx += tw + 8;
+      });
+    }
+
+    ctx.font = "italic 15px serif";
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    const exp = artist.explanation || "";
+    const words = exp.split(" ");
+    let line = "", lineY = H / 2 + 56;
+    for (const word of words) {
+      const test = line + word + " ";
+      if (ctx.measureText(test).width > maxW - 32 && line) {
+        ctx.fillText(line.trim(), 32, lineY);
+        line = word + " ";
+        lineY += 22;
+        if (lineY > H - 48) break;
+      } else { line = test; }
+    }
+    if (line) ctx.fillText(line.trim(), 32, lineY);
+
+    if (artist.obscurityScore) {
+      ctx.font = "bold 11px monospace";
+      ctx.fillStyle = `rgba(${r},${g},${b},0.8)`;
+      ctx.fillText(`obscurity ${artist.obscurityScore}/100`, 32, H - 28);
+    }
+
+    if (artist.followers) {
+      const fStr = artist.followers >= 1000
+        ? `${(artist.followers/1000).toFixed(1)}K followers`
+        : `${artist.followers} followers`;
+      ctx.font = "11px monospace";
+      ctx.fillStyle = "rgba(255,255,255,0.3)";
+      const fw = ctx.measureText(fStr).width;
+      ctx.fillText(fStr, W - fw - 32, H - 28);
+    }
+
+    return canvas.toDataURL("image/png");
+  }, []);
+
+  return { generate };
+};
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const [input, setInput]           = useState("");
@@ -233,22 +482,40 @@ export default function App() {
   const [placeholderText, setPlaceholderText] = useState("");
   const [placeholderTyping, setPlaceholderTyping] = useState(true);
 
-  // Playlist state
   const [playlist, setPlaylist]     = useState([]);
   const [showPlaylist, setShowPlaylist] = useState(false);
   const [savingPlaylist, setSavingPlaylist] = useState(false);
   const [playlistSaved, setPlaylistSaved] = useState(null);
 
-  // Theme
+  const [artistNotes, setArtistNotes]   = useState(() => {
+    try { return JSON.parse(localStorage.getItem("uncover_notes") || "{}"); } catch { return {}; }
+  });
+  const [artistRatings, setArtistRatings] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("uncover_ratings") || "{}"); } catch { return {}; }
+  });
+
+  const { generate: generateCard } = useShareCard();
+  const [sharingId, setSharingId] = useState(null);
+
   const [colorR, setColorR] = useState(118);
   const [colorG, setColorG] = useState(75);
   const [colorB, setColorB] = useState(162);
   const [showPicker, setShowPicker] = useState(false);
 
-  // Spotify
   const [spotifyToken, setSpotifyToken]         = useState(null);
   const [spotifyConnected, setSpotifyConnected] = useState(false);
-  const [suggestions, setSuggestions]           = useState([]); // full {name,id,genres} objects
+  const [suggestions, setSuggestions]           = useState([]);
+
+  // ── Persist notes & ratings ──
+  useEffect(() => {
+    try { localStorage.setItem("uncover_notes", JSON.stringify(artistNotes)); } catch {}
+  }, [artistNotes]);
+  useEffect(() => {
+    try { localStorage.setItem("uncover_ratings", JSON.stringify(artistRatings)); } catch {}
+  }, [artistRatings]);
+
+  const setNoteFor   = useCallback((name, note)   => setArtistNotes(prev   => ({ ...prev, [name]: note })),   []);
+  const setRatingFor = useCallback((name, rating) => setArtistRatings(prev => ({ ...prev, [name]: rating })), []);
 
   // ── Scan line on mount ──
   useEffect(() => {
@@ -329,7 +596,6 @@ export default function App() {
     try {
       const res = await fetch(`http://127.0.0.1:8000/spotify/suggestions?token=${token}`);
       const data = await res.json();
-      // suggestions is now an array of {name, id, genres} objects
       setSuggestions(data.suggestions || []);
     } catch {}
   };
@@ -340,7 +606,6 @@ export default function App() {
   };
 
   // ── Save to Spotify Playlist ──
-
   const refreshSpotifyToken = async () => {
     const refreshToken = localStorage.getItem('spotify_refresh_token');
     if (!refreshToken) return null;
@@ -358,22 +623,14 @@ export default function App() {
 
   const savePlaylist = async () => {
     if (!spotifyToken || playlist.length === 0) return;
-    setSavingPlaylist(true);
-    setPlaylistSaved(null);
+    setSavingPlaylist(true); setPlaylistSaved(null);
 
-    // Use the clean spotifyId field — most reliable source
     const artist_ids = playlist
       .map(a => a.spotifyId || (a.spotifyUri ? a.spotifyUri.split(":").pop() : null)
                              || (a.spotifyUrl ? a.spotifyUrl.split("/").pop()?.split("?")[0] : null))
       .filter(Boolean);
 
-    console.log("[playlist] artist_ids:", artist_ids);
-
-    if (artist_ids.length === 0) {
-      setPlaylistSaved("no_ids");
-      setSavingPlaylist(false);
-      return;
-    }
+    if (artist_ids.length === 0) { setPlaylistSaved("no_ids"); setSavingPlaylist(false); return; }
 
     const trySave = async (tokenToUse) => {
       const res = await fetch("http://127.0.0.1:8000/spotify/save-playlist", {
@@ -385,33 +642,18 @@ export default function App() {
     };
 
     try {
-      // Try current token first
       let data = await trySave(spotifyToken);
-
-      // Only refresh if token is explicitly invalid
       if (data?.error === "invalid token") {
         const retryToken = await refreshSpotifyToken();
-        if (retryToken) {
-          data = await trySave(retryToken);
-        } else {
-          setPlaylistSaved("token_expired");
-          setSavingPlaylist(false);
-          return;
-        }
+        if (retryToken) { data = await trySave(retryToken); }
+        else { setPlaylistSaved("token_expired"); setSavingPlaylist(false); return; }
       }
-
       if (data?.error) throw new Error(data.error);
       let url = data?.playlist_url;
-      if (url?.startsWith("spotify:playlist:")) {
-        url = `https://open.spotify.com/playlist/${url.split(":").pop()}`;
-      }
+      if (url?.startsWith("spotify:playlist:")) url = `https://open.spotify.com/playlist/${url.split(":").pop()}`;
       setPlaylistSaved(url || "no_url");
-    } catch (e) {
-      console.error("Playlist save error:", e);
-      setPlaylistSaved("error");
-    } finally {
-      setSavingPlaylist(false);
-    }
+    } catch { setPlaylistSaved("error"); }
+    finally { setSavingPlaylist(false); }
   };
 
   const togglePlaylist = (artist) => {
@@ -424,25 +666,49 @@ export default function App() {
 
   const inPlaylist = (name) => playlist.some(a => a.artist === name);
 
+  // ── Share card ──
+  const handleShare = async (artist, index) => {
+    setSharingId(index);
+    try {
+      const dataUrl = await generateCard(artist, `${colorR},${colorG},${colorB}`);
+      const link = document.createElement("a");
+      link.download = `uncover-${artist.artist.replace(/\s+/g, "-").toLowerCase()}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (e) {
+      console.error("Share error:", e);
+    } finally {
+      setSharingId(null);
+    }
+  };
+
   // ── Analyze ──
-  const analyze = useCallback(async (searchTerm = null) => {
+  // FIX: obscurityLevel is now passed as an explicit argument so callers like
+  // goDeeper (which update obscurityLevel in state just before calling analyze)
+  // don't hit the stale closure problem. The parameter defaults to the current
+  // state value so existing call sites (analyze() / analyze(searchTerm)) work
+  // unchanged.
+  const analyze = useCallback(async (searchTerm = null, levelOverride = null) => {
     const query = typeof searchTerm === "string" ? searchTerm : input;
     if (!query?.trim()) return;
     if (typeof searchTerm === "string") setInput(searchTerm);
 
+    // FIX: use levelOverride when provided (avoids stale closure from goDeeper)
+    const effectiveLevel = levelOverride || obscurityLevel;
+
     setLoading(true); setError(""); setTags([]); setRecs([]); setDropped(0); setExpandedCard(null);
 
-    // Save to history
     setSearchHistory(h => {
       const cleaned = h.filter(x => x !== query);
       return [query, ...cleaned].slice(0, 6);
     });
 
     try {
+      // FIX: treat each comma-separated term as either an artist name OR a
+      // genre/vibe tag. The backend now always seeds from both similar-artist
+      // and tag lookups, but we send the raw terms as the artists[] array
+      // unchanged so the backend can decide how to use them.
       const artists = query.split(",").map(a => a.trim()).filter(Boolean);
-
-      // If this search came from the Spotify suggestions strip, pass the full
-      // artist objects as hints so the backend can look up by ID rather than name
       const spotifyHints = suggestions.filter(s =>
         artists.some(a => a.toLowerCase() === (s.name || "").toLowerCase())
       ).map(s => ({ name: s.name, id: s.id, genres: s.genres || [] }));
@@ -452,7 +718,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           artists,
-          obscurity_level: obscurityLevel,
+          obscurity_level: effectiveLevel,   // FIX: use the overridden level
           spotify_token: spotifyToken,
           spotify_hints: spotifyHints.length > 0 ? spotifyHints : undefined,
         }),
@@ -461,20 +727,24 @@ export default function App() {
       const data = await res.json();
       setTags(data.tags || []);
       setRecs(data.recommendations || []);
-      setDropped(Math.max(0, 6 - (data.recommendations?.length || 0)));
+      setDropped(data.dropped_count || 0);
       setTotalUncovered(n => n + (data.recommendations?.length || 0));
       setCurrentLevelInfo({ level: data.obscurity_level, max_followers: data.max_followers, description: data.description });
     } catch { setError("Could not fetch recommendations. Is the backend running?"); }
     finally { setLoading(false); }
   }, [input, obscurityLevel, spotifyToken, suggestions]);
 
-  const goDeeper = () => {
+  // FIX: goDeeper computes the next level, updates state, and passes the new
+  // level directly to analyze() as levelOverride so the fetch uses the correct
+  // value immediately — no more stale closure causing the old level to be sent.
+  const goDeeper = useCallback(() => {
     const idx = OBSCURITY_LEVELS.findIndex(l => l.value === obscurityLevel);
     if (idx > 0) {
-      setObscurityLevel(OBSCURITY_LEVELS[idx - 1].value);
-      setTimeout(() => analyze(input), 50);
+      const nextLevel = OBSCURITY_LEVELS[idx - 1].value;
+      setObscurityLevel(nextLevel);
+      analyze(input, nextLevel);  // pass level directly — no setTimeout needed
     }
-  };
+  }, [obscurityLevel, input, analyze]);
 
   const randomize = () => {
     const seed = RANDOM_SEEDS[Math.floor(Math.random() * RANDOM_SEEDS.length)];
@@ -499,16 +769,15 @@ export default function App() {
 
   const isInitial = tags.length === 0 && recs.length === 0 && !loading;
 
+  const showToast = playlistSaved && playlistSaved.startsWith("http");
+
   return (
     <div className="app-container">
 
-      {/* ── Scan line ─────────────────────────────────────────────────── */}
       {!scanDone && <div className="scan-line" />}
-
-      {/* ── Ambient pulse ─────────────────────────────────────────────── */}
       <div className="ambient-pulse" />
 
-      {/* ── Fixed controls ────────────────────────────────────────────── */}
+      {/* ── Fixed controls ─────────────────────────────────────────── */}
       <div className="fixed-controls">
         {totalUncovered > 0 && (
           <div className="session-counter" title="Artists uncovered this session">
@@ -532,7 +801,7 @@ export default function App() {
         </button>
       </div>
 
-      {/* ── Playlist drawer ───────────────────────────────────────────── */}
+      {/* ── Playlist drawer ─────────────────────────────────────────── */}
       {showPlaylist && (
         <div className="playlist-drawer">
           <div className="drawer-header">
@@ -543,7 +812,15 @@ export default function App() {
             {playlist.map((a, i) => (
               <div key={i} className="playlist-item">
                 <span className="playlist-num">{String(i+1).padStart(2,"0")}</span>
-                <span className="playlist-name">{a.artist}</span>
+                <div className="playlist-meta">
+                  <span className="playlist-name">{a.artist}</span>
+                  {artistRatings[a.artist] > 0 && (
+                    <span className="playlist-stars">{STAR_RATINGS[artistRatings[a.artist]]}</span>
+                  )}
+                  {artistNotes[a.artist] && (
+                    <span className="playlist-note-preview">{artistNotes[a.artist].slice(0, 40)}{artistNotes[a.artist].length > 40 ? "…" : ""}</span>
+                  )}
+                </div>
                 <button className="playlist-remove" onClick={() => togglePlaylist(a)}>✕</button>
               </div>
             ))}
@@ -554,15 +831,13 @@ export default function App() {
               {savingPlaylist ? "saving…" : "🎚️ save to spotify"}
             </button>
           )}
-          {playlistSaved && playlistSaved !== "error" && playlistSaved !== "no_ids" && playlistSaved !== "no_url" && (
-            <a href={playlistSaved} target="_blank" rel="noreferrer"
-              className="playlist-saved-link"
-              onClick={e => { if (!playlistSaved?.startsWith("http")) e.preventDefault(); }}>
-              ✓ Saved! Open in Spotify ↗
-            </a>
-          )}
           {playlistSaved === "no_url" && (
             <p className="playlist-saved-link" style={{cursor:"default"}}>✓ Playlist created in Spotify</p>
+          )}
+          {playlistSaved && playlistSaved.startsWith("http") && (
+            <a href={playlistSaved} target="_blank" rel="noreferrer" className="playlist-saved-link">
+              ✓ Saved! Open in Spotify ↗
+            </a>
           )}
           {playlistSaved === "no_ids" && (
             <p className="playlist-error">None of these artists have a verified Spotify profile — can't create playlist.</p>
@@ -573,26 +848,19 @@ export default function App() {
           {playlistSaved === "error" && (
             <p className="playlist-error">Failed to save. Check your Spotify connection and try again.</p>
           )}
-          {!spotifyConnected && (
-            <p className="playlist-note">Connect Spotify to save this as a playlist</p>
-          )}
+          {!spotifyConnected && <p className="playlist-note">Connect Spotify to save this as a playlist</p>}
         </div>
       )}
 
-      {/* Playlist saved toast */}
-      {playlistSaved && playlistSaved !== "error" && playlistSaved !== "no_ids" && (
+      {showToast && (
         <div className="playlist-toast">
           <span>✓ Playlist saved</span>
-          {playlistSaved.startsWith("http") && (
-            <a href={playlistSaved} target="_blank" rel="noreferrer">
-              Open in Spotify ↗
-            </a>
-          )}
+          <a href={playlistSaved} target="_blank" rel="noreferrer">Open in Spotify ↗</a>
           <button onClick={() => setPlaylistSaved(null)}>✕</button>
         </div>
       )}
 
-      {/* ── Color Picker ──────────────────────────────────────────────── */}
+      {/* ── Color Picker ────────────────────────────────────────────── */}
       {showPicker && (
         <div className="color-picker-panel">
           <div className="picker-header">
@@ -624,7 +892,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Header ────────────────────────────────────────────────────── */}
+      {/* ── Header ──────────────────────────────────────────────────── */}
       <header className={`header ${isInitial ? "hero" : "compact"}`}>
         <div className="wordmark">
           <span className="wordmark-un">un</span><span className="wordmark-cover">cover</span>
@@ -637,7 +905,7 @@ export default function App() {
         )}
       </header>
 
-      {/* ── Spotify suggestions ───────────────────────────────────────── */}
+      {/* ── Spotify suggestions ─────────────────────────────────────── */}
       {spotifyConnected && suggestions.length > 0 && isInitial && (
         <div className="suggestions-strip">
           <span className="strip-label">🎶 from your library</span>
@@ -649,7 +917,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Obscurity panel ───────────────────────────────────────────── */}
+      {/* ── Obscurity panel ─────────────────────────────────────────── */}
       <div className="obscurity-panel">
         <div className="obscurity-header">
           <span className="obscurity-heading">Depth</span>
@@ -675,9 +943,7 @@ export default function App() {
         </div>
       </div>
 
-
-
-      {/* ── Discovery insight strip ─────────────────────────────────────── */}
+      {/* ── Discovery insight strip ─────────────────────────────────── */}
       {!isInitial && (
         <div className="insight-strip">
           <div className="insight-item">
@@ -689,13 +955,17 @@ export default function App() {
             <strong>{recs.length}</strong>
           </div>
           <div className="insight-item">
-            <span className="insight-label">playlist picks</span>
-            <strong>{playlist.length}</strong>
+            <span className="insight-label">filtered out</span>
+            <strong>{droppedCount > 0 ? `${droppedCount} too-famous` : "—"}</strong>
+          </div>
+          <div className="insight-item">
+            <span className="insight-label">playlist</span>
+            <strong>{playlist.length} saved</strong>
           </div>
         </div>
       )}
 
-      {/* ── Search bar ────────────────────────────────────────────────── */}
+      {/* ── Search bar ──────────────────────────────────────────────── */}
       <div className="search-bar">
         <textarea rows={1} className="search-input"
           placeholder={input ? "" : placeholderText + (placeholderTyping ? "▌" : "")}
@@ -713,7 +983,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── Search history ────────────────────────────────────────────── */}
+      {/* ── Search history ──────────────────────────────────────────── */}
       {searchHistory.length > 0 && (
         <div className="history-strip">
           {searchHistory.map((h, i) => (
@@ -724,7 +994,7 @@ export default function App() {
 
       {error && <div className="error-bar">{error}</div>}
 
-      {/* ── Loading ───────────────────────────────────────────────────── */}
+      {/* ── Loading ─────────────────────────────────────────────────── */}
       {loading && (
         <div className="loading-block">
           <div className="loading-track"><div className="loading-fill" /></div>
@@ -732,7 +1002,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Landing ───────────────────────────────────────────────────── */}
+      {/* ── Landing seeds ───────────────────────────────────────────── */}
       {isInitial && !spotifyConnected && (
         <div className="landing-seeds">
           <span className="seeds-label">✨ start with a vibe</span>
@@ -745,19 +1015,12 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Vibe tags ─────────────────────────────────────────────────── */}
-      {tags.length > 0 && (
-        <div className="vibe-section">
-          <span className="section-label">🗺️ vibes detected</span>
-          <div className="tag-cloud">
-            {tags.map((t, i) => (
-              <button key={i} className="vibe-tag" onClick={() => handleTagClick(t)}>{t}</button>
-            ))}
-          </div>
-        </div>
+      {/* ── Genre Mood Board ────────────────────────────────────────── */}
+      {tags.length > 0 && !loading && (
+        <GenreMoodBoard tags={tags} onTagClick={handleTagClick} />
       )}
 
-      {/* ── Results header ────────────────────────────────────────────── */}
+      {/* ── Results header ──────────────────────────────────────────── */}
       {currentLevelInfo && !loading && recs.length > 0 && (
         <div className="results-header">
           <div className="level-banner">
@@ -773,43 +1036,51 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Empty state ───────────────────────────────────────────────── */}
+      {/* ── Empty state ─────────────────────────────────────────────── */}
       {!loading && !isInitial && recs.length === 0 && !error && (
         <div className="empty-state">
           <div className="empty-icon">◉</div>
           <p className="empty-title">nothing found 🥺</p>
           <p className="empty-sub">try a broader vibe or loosen the depth slider a lil!</p>
-          <button className="empty-action" onClick={() => { setObscurityLevel("underground"); if (input) analyze(input); }}>
+          <button className="empty-action" onClick={() => { setObscurityLevel("underground"); if (input) analyze(input, "underground"); }}>
             try going a lil wider 🌱
           </button>
         </div>
       )}
 
-      {/* ── Artist cards ──────────────────────────────────────────────── */}
+      {/* ── Artist cards ────────────────────────────────────────────── */}
       <div className="artist-list">
         {recs.map((r, i) => {
           const uniqueTags = dedupeArtistTags(r.tags || [], tags);
           const followersStr = formatFollowers(r.followers);
-          const imageSource = r.image || r.spotifyImage || null;
+          // FIX: check image_itunes as additional fallback source
+          const imageSource = r.image || r.spotifyImage || r.image_itunes || null;
           const expanded = expandedCard === i;
           const saved = inPlaylist(r.artist);
+          const note   = artistNotes[r.artist]   || "";
+          const rating = artistRatings[r.artist] || 0;
 
           return (
             <article key={i} className={`artist-card ${expanded ? "expanded" : ""}`}
               style={{ animationDelay: `${i * 70}ms` }}>
 
-              {/* Rank number */}
               <div className="card-rank">{String(i + 1).padStart(2, "0")}</div>
 
-              {/* Image */}
               <ArtistImage src={imageSource} name={r.artist} />
 
-              {/* Body */}
               <div className="card-body">
                 <div className="card-header">
                   <h3 className="card-name">{r.artist}</h3>
                   <div className="card-header-right">
                     <SpotifyCornerLink spotifyId={r.spotifyId} spotifyUrl={r.spotifyUrl} />
+                    <button
+                      className={`share-btn ${sharingId === i ? "sharing" : ""}`}
+                      onClick={() => handleShare(r, i)}
+                      title="Download as image"
+                      disabled={sharingId === i}
+                    >
+                      {sharingId === i ? <Spinner /> : <ShareIcon />}
+                    </button>
                     <button
                       className={`save-btn ${saved ? "saved" : ""}`}
                       onClick={() => togglePlaylist(r)}
@@ -817,6 +1088,15 @@ export default function App() {
                       {saved ? "♥" : "♡"}
                     </button>
                   </div>
+                </div>
+
+                <div className="card-rating-row">
+                  {[1,2,3,4,5].map(n => (
+                    <button key={n}
+                      className={`star-btn-sm ${n <= rating ? "filled" : ""}`}
+                      onClick={() => setRatingFor(r.artist, rating === n ? 0 : n)}
+                      title={`Rate ${n} star${n > 1 ? "s" : ""}`}>★</button>
+                  ))}
                 </div>
 
                 {uniqueTags.length > 0 && (
@@ -831,7 +1111,6 @@ export default function App() {
 
                 <div className="card-stats">
                   {(() => {
-                    // Fall back to a score derived from the selected obscurity level
                     const levelScores = { ultra_deep: 98, deep_cut: 85, underground: 65, emerging: 45, niche: 25 };
                     const displayScore = r.obscurityScore ?? levelScores[obscurityLevel] ?? 70;
                     return (
@@ -847,10 +1126,11 @@ export default function App() {
                         <PeopleIcon /> {followersStr}
                       </span>
                     )}
+                    {/* FIX: backend now always sends lastfmUrl + lastfmVerified;
+                        show link whenever lastfmVerified is true (listener count confirmed) */}
                     {r.lastfmUrl && r.lastfmVerified && (
                       <a href={r.lastfmUrl} target="_blank" rel="noreferrer" className="link-pill link-lastfm">Last.fm</a>
                     )}
-
                   </div>
                   <button className="expand-btn" onClick={() => setExpandedCard(expanded ? null : i)}
                     title={expanded ? "Collapse" : "Expand"}>
@@ -858,7 +1138,6 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* iTunes preview — always visible */}
                 {r.sampleUrl && (
                   <WaveformPlayer
                     src={r.sampleUrl}
@@ -867,18 +1146,27 @@ export default function App() {
                   />
                 )}
 
-                {/* Expanded: top tracks */}
-                {expanded && r.topTracks?.length > 0 && (
+                {expanded && (
                   <div className="card-expanded">
-                    <div className="top-tracks">
-                      <span className="tracks-label">top tracks</span>
-                      {r.topTracks.map((t, ti) => (
-                        <div key={ti} className="track-row">
-                          <span className="track-num">{ti + 1}</span>
-                          <span className="track-name">{t.name}</span>
-                        </div>
-                      ))}
-                    </div>
+                    {r.topTracks?.length > 0 && (
+                      <div className="top-tracks">
+                        <span className="tracks-label">top tracks</span>
+                        {r.topTracks.map((t, ti) => (
+                          <div key={ti} className="track-row">
+                            <span className="track-num">{ti + 1}</span>
+                            <span className="track-name">{t.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <ArtistNotes
+                      artistName={r.artist}
+                      notes={note}
+                      setNotes={(n) => setNoteFor(r.artist, n)}
+                      rating={rating}
+                      setRating={(rt) => setRatingFor(r.artist, rt)}
+                    />
                   </div>
                 )}
 
@@ -899,10 +1187,6 @@ const SpotifyIcon = ({ connected, size = 16 }) => (
     <path d="M17.9 10.9C14.7 9 9.35 8.8 6.3 9.75c-.5.15-1-.15-1.15-.6-.15-.5.15-1 .6-1.15 3.55-1.05 9.4-.85 13.1 1.35.45.25.6.85.35 1.3-.25.35-.85.5-1.3.25zm-.1 2.8c-.25.4-.75.5-1.15.25-2.65-1.65-6.7-2.1-9.85-1.15-.4.1-.85-.1-.95-.5-.1-.4.1-.85.5-.95 3.6-1.1 8.1-.55 11.15 1.3.4.25.5.75.3 1.05zm-1.3 2.7c-.2.3-.6.4-.9.2-2.3-1.4-5.2-1.75-8.6-.95-.35.1-.65-.15-.75-.45-.1-.35.15-.65.45-.75 3.75-.85 6.95-.45 9.5 1.1.35.2.4.6.3.85z"
       fill={connected ? "#1DB954" : "currentColor"} opacity={connected ? 1 : 0.8}/>
   </svg>
-);
-
-const CheckIcon = () => (
-  <svg width="9" height="9" viewBox="0 0 10 10"><polyline points="1,5 4,8 9,2" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
 );
 
 const Spinner = () => (
@@ -949,5 +1233,13 @@ const PeopleIcon = () => (
     <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
     <circle cx="9" cy="7" r="4"/>
     <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+  </svg>
+);
+
+const ShareIcon = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="7,10 12,15 17,10"/>
+    <line x1="12" y1="15" x2="12" y2="3"/>
   </svg>
 );
