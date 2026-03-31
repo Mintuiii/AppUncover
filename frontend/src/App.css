@@ -29,7 +29,7 @@ body {
   overflow-x: hidden;
 }
 
-/* ── Layout ────────────────────────────────────────────────────────────── */
+/* ── Layout ─────────────────────────────────────────────────────────────── */
 .app-container {
   max-width: 760px;
   margin: 0 auto;
@@ -92,13 +92,16 @@ body {
 .drawer-title { font-family: var(--font-mono); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 2px; color: var(--fg-dim); }
 .playlist-items { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
 .playlist-item {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: flex-start; gap: 10px;
   padding: 8px 10px; background: rgba(255,255,255,0.03);
   border-bottom: 1px solid var(--border);
 }
-.playlist-num { font-family: var(--font-mono); font-size: 0.6rem; color: var(--fg-faint); min-width: 20px; }
-.playlist-name { flex: 1; font-family: var(--font-head); font-size: 0.82rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.playlist-remove { background: none; border: none; color: var(--fg-dim); cursor: pointer; font-size: 0.75rem; transition: color var(--ease); padding: 0; }
+.playlist-num { font-family: var(--font-mono); font-size: 0.6rem; color: var(--fg-faint); min-width: 20px; padding-top: 2px; }
+.playlist-meta { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.playlist-name { font-family: var(--font-head); font-size: 0.82rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.playlist-stars { font-size: 0.6rem; color: #fcd34d; letter-spacing: 1px; }
+.playlist-note-preview { font-size: 0.65rem; color: var(--fg-dim); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.playlist-remove { background: none; border: none; color: var(--fg-dim); cursor: pointer; font-size: 0.75rem; transition: color var(--ease); padding: 0; flex-shrink: 0; margin-top: 2px; }
 .playlist-remove:hover { color: #ff6060; }
 
 .save-playlist-btn {
@@ -285,16 +288,62 @@ body {
 }
 .seed-tag:hover { border-color: var(--fg); color: var(--fg); background: rgba(255,255,255,0.07); }
 
-/* ── Vibe tags ──────────────────────────────────────────────────────────── */
-.vibe-section { margin-bottom: 24px; }
-.section-label { display: block; font-family: var(--font-mono); font-size: 0.58rem; text-transform: uppercase; letter-spacing: 2px; color: var(--fg-faint); margin-bottom: 10px; }
-.tag-cloud { display: flex; flex-wrap: wrap; gap: 6px; }
-.vibe-tag {
-  background: rgba(var(--accent-rgb),0.07); border: 1px solid rgba(var(--accent-rgb),0.3);
-  color: var(--fg-dim); font-family: var(--font-mono); font-size: 0.7rem;
-  padding: 5px 12px; border-radius: 999px; cursor: pointer; transition: all var(--ease);
+/* ── Section label (shared utility) ─────────────────────────────────────── */
+/* FIX: this class was missing, causing "🎨 vibe map" header to render unstyled */
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--fg-dim);
 }
-.vibe-tag:hover { background: var(--accent); color: #fff; border-color: var(--accent); transform: scale(1.04); }
+
+/* ── Genre Mood Board ───────────────────────────────────────────────────── */
+.mood-board {
+  margin-bottom: 24px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  background: rgba(var(--accent-rgb), 0.03);
+  animation: fadeUp 0.4s ease;
+}
+
+.mood-board-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 14px;
+}
+
+.mood-board-hint {
+  font-family: var(--font-mono); font-size: 0.58rem;
+  color: var(--fg-faint); letter-spacing: 1px;
+}
+
+.mood-cloud {
+  display: flex; flex-wrap: wrap;
+  gap: 8px; align-items: center;
+}
+
+.mood-tag {
+  border: 1px solid; border-radius: 999px;
+  cursor: pointer; font-family: var(--font-mono);
+  transition: all 0.2s ease; letter-spacing: 0.3px;
+  animation: moodTagIn 0.4s ease both;
+  white-space: nowrap;
+}
+
+.mood-tag-tier3 { font-size: 0.85rem; padding: 7px 18px; font-weight: 700; }
+.mood-tag-tier2 { font-size: 0.72rem; padding: 5px 14px; }
+.mood-tag-tier1 { font-size: 0.62rem; padding: 4px 11px; opacity: 0.8; }
+
+.mood-tag:hover {
+  transform: scale(1.06) translateY(-1px);
+  box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.25);
+  opacity: 1;
+}
+
+@keyframes moodTagIn {
+  from { opacity: 0; transform: scale(0.8) translateY(6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
 
 /* ── Results header ─────────────────────────────────────────────────────── */
 .results-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 12px; }
@@ -325,7 +374,7 @@ body {
 .empty-action { background: transparent; border: 1px solid var(--fg); color: var(--fg); font-family: var(--font-mono); font-size: 0.72rem; padding: 8px 18px; cursor: pointer; transition: all var(--ease); letter-spacing: 1px; }
 .empty-action:hover { background: var(--fg); color: var(--bg); }
 
-/* ── Artist cards — editorial layout ───────────────────────────────────── */
+/* ── Artist cards ───────────────────────────────────────────────────────── */
 .artist-list { display: flex; flex-direction: column; gap: 1px; padding-bottom: 80px; }
 
 .artist-card {
@@ -353,7 +402,6 @@ body {
   user-select: none;
 }
 
-/* Large square image */
 .artist-img { width: 160px; height: 160px; object-fit: cover; display: block; flex-shrink: 0; border-radius: 12px 0 0 12px; }
 .artist-card.expanded .artist-img { height: 100%; min-height: 160px; }
 
@@ -386,12 +434,36 @@ body {
 }
 .spotify-corner-link:hover { opacity: 1; transform: scale(1.15); }
 
+/* ── Share button ───────────────────────────────────────────────────────── */
+.share-btn {
+  background: none; border: none; font-size: 0.8rem; cursor: pointer;
+  color: var(--fg-faint); transition: all var(--ease); line-height: 1;
+  padding: 0; display: flex; align-items: center;
+}
+.share-btn:hover:not(:disabled) { color: var(--accent); transform: translateY(-1px); }
+.share-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+.share-btn.sharing { color: var(--accent); }
+
 .save-btn {
   background: none; border: none; font-size: 1rem; cursor: pointer;
   color: var(--fg-faint); transition: all var(--ease); line-height: 1; padding: 0;
 }
 .save-btn:hover { color: var(--fg); }
 .save-btn.saved { color: #ff6b8a; }
+
+/* ── Inline star rating (compact, card row) ─────────────────────────────── */
+.card-rating-row {
+  display: flex; align-items: center; gap: 1px;
+  margin-top: -2px; margin-bottom: 2px;
+}
+.star-btn-sm {
+  background: none; border: none; cursor: pointer; padding: 0;
+  font-size: 0.78rem; color: var(--border);
+  transition: color 0.12s ease, transform 0.12s ease;
+  line-height: 1;
+}
+.star-btn-sm.filled { color: #fcd34d; }
+.star-btn-sm:hover { color: #fcd34d; transform: scale(1.2); }
 
 .card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .card-tag {
@@ -420,8 +492,6 @@ body {
 .link-spotify:hover { background: #1DB954; color: #000; border-color: #1DB954; }
 .link-lastfm  { background: transparent; border-color: rgba(var(--accent-rgb),0.3); color: var(--accent); }
 .link-lastfm:hover { background: var(--accent); color: #fff; }
-.link-yt { background: transparent; border-color: rgba(255,80,50,0.3); color: rgba(255,100,70,0.8); }
-.link-yt:hover { background: rgb(255,70,40); color: #fff; }
 
 .expand-btn {
   background: rgba(var(--accent-rgb),0.07); border: 1px solid rgba(var(--accent-rgb),0.2); color: var(--fg-dim);
@@ -430,7 +500,7 @@ body {
 }
 .expand-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
 
-.card-expanded { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; animation: fadeUp 0.25s ease; }
+.card-expanded { display: flex; flex-direction: column; gap: 12px; padding-top: 4px; animation: fadeUp 0.25s ease; }
 
 .top-tracks { display: flex; flex-direction: column; gap: 2px; }
 .tracks-label { font-family: var(--font-mono); font-size: 0.55rem; text-transform: uppercase; letter-spacing: 2px; color: var(--fg-faint); margin-bottom: 6px; display: block; }
@@ -438,6 +508,75 @@ body {
 .track-row:hover { background: rgba(255,255,255,0.03); }
 .track-num { font-family: var(--font-mono); font-size: 0.6rem; color: var(--fg-faint); min-width: 14px; }
 .track-name { font-size: 0.85rem; color: var(--fg-dim); }
+
+/* ── Artist Notes ───────────────────────────────────────────────────────── */
+.artist-notes {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,0.02);
+}
+
+.notes-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+
+.notes-label {
+  font-family: var(--font-mono); font-size: 0.55rem;
+  text-transform: uppercase; letter-spacing: 2px; color: var(--fg-faint);
+}
+
+/* ── Star rating (full notes panel) ────────────────────────────────────── */
+.star-rating { display: flex; gap: 2px; }
+.star-btn {
+  background: none; border: none; cursor: pointer; padding: 0;
+  font-size: 1rem; color: var(--border);
+  transition: color 0.12s ease, transform 0.12s ease;
+  line-height: 1;
+}
+.star-btn.filled { color: #fcd34d; }
+.star-btn:hover { color: #fcd34d; transform: scale(1.15); }
+
+.notes-display {
+  cursor: text; min-height: 28px;
+}
+.notes-text {
+  font-family: var(--font-body); font-style: italic;
+  font-size: 0.88rem; color: var(--fg-dim); line-height: 1.5;
+}
+.notes-placeholder {
+  font-family: var(--font-mono); font-size: 0.65rem;
+  color: var(--fg-faint); letter-spacing: 0.5px;
+  transition: color var(--ease);
+}
+.notes-display:hover .notes-placeholder { color: var(--fg-dim); }
+
+.notes-edit { display: flex; flex-direction: column; gap: 8px; }
+.notes-textarea {
+  width: 100%; background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(var(--accent-rgb),0.3); border-radius: 6px;
+  color: var(--fg); font-family: var(--font-body); font-style: italic;
+  font-size: 0.88rem; padding: 8px 12px; resize: vertical;
+  outline: none; line-height: 1.5; transition: border-color var(--ease);
+}
+.notes-textarea:focus { border-color: var(--accent); }
+.notes-textarea::placeholder { color: var(--fg-faint); }
+
+.notes-actions { display: flex; gap: 8px; }
+.notes-btn {
+  font-family: var(--font-mono); font-size: 0.65rem; padding: 4px 12px;
+  border-radius: 4px; cursor: pointer; transition: all var(--ease); letter-spacing: 0.5px;
+}
+.notes-save {
+  background: var(--accent); color: #fff; border: none;
+}
+.notes-save:hover { opacity: 0.85; }
+.notes-cancel {
+  background: transparent; color: var(--fg-dim);
+  border: 1px solid var(--border);
+}
+.notes-cancel:hover { border-color: var(--fg); color: var(--fg); }
 
 /* ── Obscurity ring ─────────────────────────────────────────────────────── */
 .obscurity-ring { display: flex; flex-direction: column; align-items: center; gap: 1px; flex-shrink: 0; }
@@ -447,10 +586,6 @@ body {
 .signal-bars { display: flex; align-items: flex-end; gap: 2px; height: 18px; flex-shrink: 0; }
 .signal-bar { width: 3px; border-radius: 1px 1px 0 0; background: var(--border); transition: background 0.3s ease; min-height: 3px; }
 .signal-bar.active { background: var(--accent); }
-
-/* ── Spotify embed ──────────────────────────────────────────────────────── */
-.spotify-embed { overflow: hidden; background: #000; }
-.spotify-embed iframe { display: block; }
 
 /* ── Waveform player ────────────────────────────────────────────────────── */
 .waveform-player { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
@@ -467,8 +602,24 @@ body {
 @keyframes barPulse { 0%,100%{transform:scaleY(0.5)} 50%{transform:scaleY(1)} }
 .waveform-label { font-family: var(--font-mono); font-size: 0.58rem; color: var(--fg-faint); white-space: nowrap; letter-spacing: 0.5px; }
 
-/* ── Animations ─────────────────────────────────────────────────────────── */
-@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+/* ── Playlist toast ─────────────────────────────────────────────────────── */
+.playlist-toast {
+  position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
+  background: #1DB954; color: #000; font-family: var(--font-mono);
+  font-size: 0.75rem; font-weight: 700; letter-spacing: 0.5px;
+  padding: 12px 20px; border-radius: 999px;
+  display: flex; align-items: center; gap: 14px;
+  z-index: 999; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  animation: toastIn 0.2s cubic-bezier(0.34,1.56,0.64,1); white-space: nowrap;
+}
+.playlist-toast a { color: #000; text-decoration: underline; font-weight: 700; }
+.playlist-toast a:hover { opacity: 0.7; }
+.playlist-toast button { background: none; border: none; color: #000; cursor: pointer; font-size: 0.9rem; opacity: 0.6; padding: 0; line-height: 1; }
+.playlist-toast button:hover { opacity: 1; }
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
 
 /* ── Mobile ─────────────────────────────────────────────────────────────── */
 @media (max-width: 560px) {
@@ -489,48 +640,7 @@ body {
   .insight-strip { flex-direction: column; }
   .insight-item { border-right: none; border-bottom: 1px solid var(--border); }
   .insight-item:last-child { border-bottom: none; }
-}
-
-
-.playlist-toast {
-  position: fixed;
-  bottom: 32px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #1DB954;
-  color: #000;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  padding: 12px 20px;
-  border-radius: 999px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  z-index: 999;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-  animation: toastIn 0.2s cubic-bezier(0.34,1.56,0.64,1);
-  white-space: nowrap;
-}
-.playlist-toast a {
-  color: #000;
-  text-decoration: underline;
-  font-weight: 700;
-}
-.playlist-toast a:hover { opacity: 0.7; }
-.playlist-toast button {
-  background: none;
-  border: none;
-  color: #000;
-  cursor: pointer;
-  font-size: 0.9rem;
-  opacity: 0.6;
-  padding: 0;
-  line-height: 1;
-}
-.playlist-toast button:hover { opacity: 1; }
-@keyframes toastIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .mood-tag-tier3 { font-size: 0.75rem; padding: 6px 14px; }
+  .mood-tag-tier2 { font-size: 0.65rem; padding: 4px 11px; }
+  .mood-tag-tier1 { font-size: 0.58rem; padding: 3px 9px; }
 }
