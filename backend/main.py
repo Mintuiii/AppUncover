@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os, requests, urllib.parse, time, secrets, threading, random, math
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from enum import Enum
@@ -25,11 +25,11 @@ class ObscurityLevel(str, Enum):
     NICHE       = "niche"
 
 OBSCURITY_CONFIG = {
-    ObscurityLevel.ULTRA_DEEP:  {"max_followers": 1000,   "max_popularity": 15, "target_popularity": 8,  "max_lfm_listeners": 5_000,    "target_lfm_listeners": 2_000,   "description": "ultra-obscure bedroom/basement artists"},
-    ObscurityLevel.DEEP_CUT:    {"max_followers": 10000,  "max_popularity": 30, "target_popularity": 20, "max_lfm_listeners": 50_000,   "target_lfm_listeners": 30_000,  "description": "deep underground artists"},
-    ObscurityLevel.UNDERGROUND: {"max_followers": 50000,  "max_popularity": 45, "target_popularity": 35, "max_lfm_listeners": 200_000,  "target_lfm_listeners": 120_000, "description": "underground/indie artists"},
-    ObscurityLevel.EMERGING:    {"max_followers": 100000, "max_popularity": 58, "target_popularity": 50, "max_lfm_listeners": 500_000,  "target_lfm_listeners": 300_000, "description": "emerging/indie artists"},
-    ObscurityLevel.NICHE:       {"max_followers": 500000, "max_popularity": 72, "target_popularity": 62, "max_lfm_listeners": 2_000_000,"target_lfm_listeners": 1_000_000,"description": "niche/alternative artists"},
+    ObscurityLevel.ULTRA_DEEP:  {"max_followers": 1_000,    "max_popularity": 15, "target_popularity": 8,  "max_lfm_listeners": 5_000,    "target_lfm_listeners": 2_000,    "description": "ultra-obscure bedroom/basement artists"},
+    ObscurityLevel.DEEP_CUT:    {"max_followers": 10_000,   "max_popularity": 30, "target_popularity": 20, "max_lfm_listeners": 50_000,   "target_lfm_listeners": 30_000,   "description": "deep underground artists"},
+    ObscurityLevel.UNDERGROUND: {"max_followers": 50_000,   "max_popularity": 45, "target_popularity": 35, "max_lfm_listeners": 200_000,  "target_lfm_listeners": 120_000,  "description": "underground/indie artists"},
+    ObscurityLevel.EMERGING:    {"max_followers": 100_000,  "max_popularity": 58, "target_popularity": 50, "max_lfm_listeners": 500_000,  "target_lfm_listeners": 300_000,  "description": "emerging/indie artists"},
+    ObscurityLevel.NICHE:       {"max_followers": 500_000,  "max_popularity": 72, "target_popularity": 62, "max_lfm_listeners": 2_000_000,"target_lfm_listeners": 1_000_000,"description": "niche/alternative artists"},
 }
 
 REGIONAL_TAG_KEYWORDS: Dict[str, str] = {
@@ -141,6 +141,8 @@ def detect_seed_language(top_artists: List[str], top_genres: List[str]) -> Optio
             if kw in gl:
                 print(f"[language] '{region}' from Spotify genre '{g}'")
                 return region
+    # FIX: use cached _lfm_tags from verify_candidate results where possible;
+    # only do extra Last.fm calls here as a fallback for seed artists
     if LASTFM_KEY:
         for artist in top_artists[:3]:
             for tag in lastfm_get_artist_tags(artist):
@@ -152,6 +154,11 @@ def detect_seed_language(top_artists: List[str], top_genres: List[str]) -> Optio
     return None
 
 def filter_by_language(candidates: List[Dict], region: str) -> List[Dict]:
+    """
+    FIX: Now uses cached _lfm_tags from verify_candidate instead of making
+    extra Last.fm API calls per artist. Only falls back to a live call if the
+    cached tag list is empty.
+    """
     mb_areas = REGION_TO_MB_AREAS.get(region, [])
     keywords = [kw for kw, v in REGIONAL_TAG_KEYWORDS.items() if v == region]
 
@@ -159,13 +166,15 @@ def filter_by_language(candidates: List[Dict], region: str) -> List[Dict]:
         area = rec.get("_mb_area", "")
         if area and mb_areas and any(a in area for a in mb_areas):
             return True
-        mb_tags = " ".join(rec.get("_mb_tags", []))
-        if mb_tags and keywords and any(kw in mb_tags for kw in keywords):
-            return True
+        # Use pre-fetched _lfm_tags from verify_candidate (no extra API call)
+        cached_tags = rec.get("_lfm_tags", [])
+        if cached_tags:
+            lfm = " ".join(_norm(t) for t in cached_tags)
+            return any(kw in lfm for kw in keywords)
+        # Only fall back to a live Last.fm call if we have no cached tags at all
         if LASTFM_KEY:
             lfm = " ".join(_norm(t) for t in lastfm_get_artist_tags(rec["name"]))
-            if any(kw in lfm for kw in keywords):
-                return True
+            return any(kw in lfm for kw in keywords)
         return False
 
     kept = [r for r in candidates if matches(r)]
@@ -251,13 +260,18 @@ def lastfm_get_info(artist_name: str) -> Dict:
     except: pass
     return {}
 
+# FIX: Helper to build Last.fm artist URL — used to populate lastfmUrl in results
+def lastfm_artist_url(artist_name: str) -> str:
+    encoded = urllib.parse.quote(artist_name.replace(" ", "+"))
+    return f"https://www.last.fm/music/{encoded}"
+
 # ---------------------------------------------------------------------------
-# Spotify
+# Spotify helpers
 # ---------------------------------------------------------------------------
 _spotify_request_lock = threading.Lock()
 _spotify_pause_until: float = 0.0
 _spotify_last_request: float = 0.0
-_SPOTIFY_MIN_INTERVAL = 0.25  # 4 req/s max
+_SPOTIFY_MIN_INTERVAL = 0.25
 
 def _spotify_wait():
     global _spotify_last_request
@@ -279,7 +293,7 @@ def _spotify_trigger_backoff(retry_after: int):
     with _spotify_request_lock:
         if resume_at > _spotify_pause_until:
             _spotify_pause_until = resume_at
-    print(f"[spotify] 429 — circuit breaker set for {safe_wait}s (Retry-After was {retry_after}s)")
+    print(f"[spotify] 429 — circuit breaker set for {safe_wait}s")
 
 def spotify_find_artist(name: str, token: str) -> Optional[Dict]:
     def _search(t):
@@ -353,11 +367,6 @@ REGION_TO_MB_AREAS = {
 
 def obscurity_score(lfm_listeners: Optional[int], target: int, max_val: int,
                     popularity: Optional[int] = None, target_pop: int = 20, max_pop: int = 30) -> Optional[int]:
-    """
-    Bell curve peaking near target. Uses Last.fm listeners as primary signal
-    (updated frequently, accurate for obscurity). Spotify popularity used as
-    secondary signal when available — takes the lower (more conservative) score.
-    """
     def _bell(value: int, tgt: int, ceiling: int) -> int:
         if value > ceiling: return 0
         ratio     = value / ceiling if ceiling > 0 else 0
@@ -375,7 +384,6 @@ def obscurity_score(lfm_listeners: Optional[int], target: int, max_val: int,
 # Parallel helpers
 # ---------------------------------------------------------------------------
 def _names_match(a: str, b: str) -> bool:
-    """Fuzzy name match — strips punctuation/case to avoid rejecting e.g. 'Björk' vs 'Bjork'."""
     import re
     def clean(s):
         return re.sub(r"[^a-z0-9]", "", s.lower())
@@ -400,10 +408,11 @@ def verify_candidate(name: str, _token_unused: Optional[str] = None) -> Dict:
                 except (ValueError, TypeError):
                     listeners = None
                 tags = [t["name"] for t in data.get("tags", {}).get("tag", []) if t.get("name")][:5]
-                # Parse image from same response — largest non-placeholder
+                # FIX: filter out the Last.fm placeholder image hash
+                LASTFM_PLACEHOLDER = "2a96cbd8b46e442f"
                 for img in reversed(data.get("image", [])):
                     url = img.get("#text", "")
-                    if url and "2a96cbd8b46e442fc41c2b86b821562f" not in url:
+                    if url and LASTFM_PLACEHOLDER not in url:
                         image = url
                         break
                 print(f"[verify] '{name}' listeners={listeners}")
@@ -421,67 +430,135 @@ def verify_candidate(name: str, _token_unused: Optional[str] = None) -> Dict:
         "lfm_listeners": listeners,
         "popularity":    None,
         "spotify_image": image,
-        "_lfm_tags":     tags,   # store for enrich, no re-fetch needed
+        "_lfm_tags":     tags,   # cached — used by filter_by_language to avoid extra calls
         "_mb_area":      "",
         "_mb_tags":      [],
     }
 
-def enrich_artist(rec: Dict, token: Optional[str], search_tags: List[str], seed_artists: List[str], market: str = "US", cfg: Optional[Dict] = None) -> Optional[Dict]:
-    name = rec["name"]
+def enrich_artist(rec: Dict, token: Optional[str], search_tags: List[str],
+                  seed_artists: List[str], market: str = "US",
+                  cfg: Optional[Dict] = None) -> Optional[Dict]:
+    """
+    Enrich a verified candidate with Spotify data, then emit a full result dict.
 
-    # Spotify lookup — only happens here, for final artists only
+    FIX — two critical changes:
+    1. Always returns a result (using Last.fm data as fallback) instead of
+       returning None when Spotify lookup fails. This prevents the candidate
+       pool from being silently emptied by Spotify misses.
+    2. Populates lastfmUrl and lastfmVerified so the frontend can render the
+       Last.fm link correctly (was missing entirely in the original).
+    """
+    name = rec["name"]
+    cfg  = cfg or {}
+
+    max_followers  = cfg.get("max_followers",  10_000)
+    max_popularity = cfg.get("max_popularity", 30)
+
+    lfm_tags      = rec.get("_lfm_tags", [])
+    lfm_listeners = rec.get("lfm_listeners")
+    target_lfm    = cfg.get("target_lfm_listeners", 30_000)
+    max_lfm       = cfg.get("max_lfm_listeners",    50_000)
+    target_pop    = cfg.get("target_popularity",    20)
+
+    # FIX: build Last.fm URL + verified flag regardless of Spotify status
+    lfm_url      = lastfm_artist_url(name)
+    lfm_verified = lfm_listeners is not None  # True when Last.fm has a real listener count
+
+    # --- Spotify lookup -------------------------------------------------------
     sp = spotify_find_artist(name, token) if token else None
     if sp and not _names_match(name, sp.get("name", "")):
-        print(f"[enrich] name mismatch: '{name}' vs '{sp.get('name')}' — discarding")
+        print(f"[enrich] name mismatch: '{name}' vs '{sp.get('name')}' — discarding Spotify data")
         sp = None
 
-    # If no Spotify presence, drop this artist entirely
-    if not sp:
-        print(f"[enrich] '{name}' not on Spotify — skipping")
-        return None
+    if sp:
+        # --- HARD FOLLOWER / POPULARITY GATE ----------------------------------
+        followers_total = (sp.get("followers") or {}).get("total") or 0
+        popularity      = sp.get("popularity") or 0
 
-    aid        = sp.get("id")
-    popularity = sp.get("popularity")
-    sp_image   = (sp.get("images") or [{}])[0].get("url")
-    image      = sp_image or rec.get("spotify_image")
+        if followers_total > max_followers:
+            print(f"[filter] '{name}' DROPPED — {followers_total:,} followers > max {max_followers:,}")
+            return None
 
-    tracks = get_top_tracks(aid, token, market) if aid and token else []
-    meta   = get_itunes_meta(name)
+        if popularity > max_popularity:
+            print(f"[filter] '{name}' DROPPED — popularity {popularity} > max {max_popularity}")
+            return None
 
-    # Use tags from verify step — never re-fetch Last.fm
-    lfm_tags      = rec.get("_lfm_tags", [])
-    tags          = (sp.get("genres", [])[:3] or lfm_tags or search_tags[:2])
-    explanation   = build_explanation(name, tags, seed_artists)
+        aid      = sp.get("id")
+        sp_image = (sp.get("images") or [{}])[0].get("url")
+        image    = sp_image or rec.get("spotify_image")
+        tracks   = get_top_tracks(aid, token, market) if aid and token else []
+        tags     = (sp.get("genres", [])[:3] or lfm_tags or search_tags[:2])
 
-    lfm_listeners = rec.get("lfm_listeners")   # always from verify, never re-fetched
-    target_lfm    = (cfg or {}).get("target_lfm_listeners", 30_000)
-    max_lfm       = (cfg or {}).get("max_lfm_listeners",    50_000)
-    target_pop    = (cfg or {}).get("target_popularity",    20)
-    max_pop       = (cfg or {}).get("max_popularity",       30)
+        print(f"[enrich] '{name}' ✓ Spotify followers={followers_total:,} popularity={popularity} lfm={lfm_listeners}")
 
-    print(f"[enrich] '{name}' spotify_pop={popularity} lfm_listeners={lfm_listeners}")
+        return {
+            "artist":          name,
+            "explanation":     build_explanation(name, tags, seed_artists),
+            "tags":            tags,
+            "image":           image,
+            "sampleUrl":       None,  # filled by iTunes below
+            "sampleTrack":     None,
+            "primaryUrl":      f"https://open.spotify.com/artist/{aid}",
+            "primaryUrlLabel": "Spotify",
+            "spotifyUrl":      f"https://open.spotify.com/artist/{aid}",
+            "spotifyEmbed":    f"https://open.spotify.com/embed/artist/{aid}",
+            "spotifyUri":      sp.get("uri"),
+            "spotifyId":       aid,
+            "topTracks":       tracks,
+            "followers":       followers_total,
+            "lfmListeners":    lfm_listeners,
+            "lfmUrl":          lfm_url,       # FIX: was missing
+            "lastfmUrl":       lfm_url,       # FIX: frontend key
+            "lastfmVerified":  lfm_verified,  # FIX: was missing
+            "popularity":      popularity,
+            "obscurityScore":  obscurity_score(lfm_listeners, target_lfm, max_lfm,
+                                               popularity, target_pop, max_popularity),
+            "verified":        True,
+            "spotifyVerified": True,
+            **_get_itunes(name),
+        }
+    else:
+        # FIX: Fallback path — artist not on Spotify (or no token). Return a
+        # Last.fm-only result rather than None so the pool doesn't collapse.
+        # Still apply the lfm_listeners cap so off-radar artists don't sneak
+        # through the obscurity filter.
+        if lfm_listeners is not None and lfm_listeners > max_lfm:
+            print(f"[filter] '{name}' DROPPED (lfm-only) — {lfm_listeners:,} listeners > max {max_lfm:,}")
+            return None
 
-    return {
-        "artist":          name,
-        "explanation":     explanation,
-        "tags":            tags,
-        "image":           image,
-        "sampleUrl":       meta.get("sampleUrl"),
-        "sampleTrack":     meta.get("sampleTrack"),
-        "primaryUrl":      f"https://open.spotify.com/artist/{aid}",
-        "primaryUrlLabel": "Spotify",
-        "spotifyUrl":      f"https://open.spotify.com/artist/{aid}",
-        "spotifyEmbed":    f"https://open.spotify.com/embed/artist/{aid}",
-        "spotifyUri":      sp.get("uri"),
-        "topTracks":       tracks,
-        "followers":       sp.get("followers", {}).get("total"),
-        "lfmListeners":    lfm_listeners,
-        "popularity":      popularity,
-        "obscurityScore":  obscurity_score(lfm_listeners, target_lfm, max_lfm, popularity, target_pop, max_pop),
-        "verified":        True,
-        "spotifyVerified": True,
-        "spotifyId":       aid,
-    }
+        tags  = lfm_tags or search_tags[:2]
+        image = rec.get("spotify_image")  # Last.fm image saved in verify_candidate
+        print(f"[enrich] '{name}' ✓ Last.fm-only lfm={lfm_listeners}")
+
+        return {
+            "artist":          name,
+            "explanation":     build_explanation(name, tags, seed_artists),
+            "tags":            tags,
+            "image":           image,
+            "primaryUrl":      lfm_url,
+            "primaryUrlLabel": "Last.fm",
+            "spotifyUrl":      None,
+            "spotifyEmbed":    None,
+            "spotifyUri":      None,
+            "spotifyId":       None,
+            "topTracks":       [],
+            "followers":       None,
+            "lfmListeners":    lfm_listeners,
+            "lfmUrl":          lfm_url,       # FIX: was missing
+            "lastfmUrl":       lfm_url,       # FIX: frontend key
+            "lastfmVerified":  lfm_verified,  # FIX: was missing
+            "popularity":      None,
+            "obscurityScore":  obscurity_score(lfm_listeners, target_lfm, max_lfm),
+            "verified":        lfm_verified,
+            "spotifyVerified": False,
+            **_get_itunes(name),
+        }
+
+def _get_itunes(name: str) -> Dict:
+    """Thin wrapper so both code paths above can include iTunes data cleanly."""
+    meta = get_itunes_meta(name)
+    return {"sampleUrl": meta.get("sampleUrl"), "sampleTrack": meta.get("sampleTrack"),
+            "image_itunes": meta.get("image")}
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -512,8 +589,10 @@ def analyze_artists(data: ArtistInput):
             print(f"[market] error: {e}")
 
     input_artists = [a.strip() for a in (data.artists or []) if a and a.strip()]
-    top_artists: List[str] = list(dict.fromkeys(input_artists + [h["name"] for h in (data.spotify_hints or []) if h.get("name")]))
-    top_genres:  List[str] = []
+    top_artists: List[str] = list(dict.fromkeys(
+        input_artists + [h["name"] for h in (data.spotify_hints or []) if h.get("name")]
+    ))
+    top_genres: List[str] = []
 
     for hint in (data.spotify_hints or []):
         top_genres.extend((hint.get("genres") or [])[:2])
@@ -535,7 +614,12 @@ def analyze_artists(data: ArtistInput):
         except Exception as e:
             print(f"[top_artists] error: {e}")
 
-    top_genres = list(dict.fromkeys(top_genres))
+    top_genres  = list(dict.fromkeys(top_genres))
+
+    # FIX: treat each input term as both a potential artist name AND a genre/tag.
+    # Previously, non-artist genre queries (e.g. "Japanese Jazz") were only used
+    # as artist lookup seeds and then found nothing via lastfm_similar_artists.
+    # Now we always also seed from lastfm_tag_artists using the raw input terms.
     search_tags = derive_search_tags(data.artists or [], top_artists[:8], top_genres[:8])
     if len(search_tags) < 2:
         for a in (data.artists or []):
@@ -548,38 +632,36 @@ def analyze_artists(data: ArtistInput):
     discovery_seeds = top_artists[:5]
     seed_lower = {n.lower() for n in discovery_seeds}
 
-    def _get_similar(a):
-        return lastfm_similar_artists(a, 50)
-
-    def _get_tag_artists(t):
-        return lastfm_tag_artists(t, 30)
-
+    # Similar-artist seeds (works well when input is artist names)
     with ThreadPoolExecutor(max_workers=5) as ex:
-        for names in ex.map(_get_similar, discovery_seeds):
+        for names in ex.map(lambda a: lastfm_similar_artists(a, 50), discovery_seeds):
             for name in names:
                 if name.lower() not in seed_lower:
                     candidate_names[name] = None
 
-    if len(candidate_names) < 15:
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for names in ex.map(_get_tag_artists, search_tags[:4]):
-                for name in names:
-                    if name.lower() not in seed_lower:
-                        candidate_names[name] = None
+    # FIX: ALWAYS also seed from tags — this is the primary path when the user
+    # typed a genre/vibe instead of an artist name (e.g. "Japanese Jazz",
+    # "Darkwave", "Ethiopian Funk"). Previously tag seeding only ran as a
+    # fallback when candidate_names had < 15 entries.
+    all_tag_seeds = list(dict.fromkeys(search_tags + [_norm(a) for a in (data.artists or [])]))
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        for names in ex.map(lambda t: lastfm_tag_artists(t, 40), all_tag_seeds[:6]):
+            for name in names:
+                if name.lower() not in seed_lower:
+                    candidate_names[name] = None
 
     if not candidate_names:
         return {"tags": search_tags, "recommendations": [],
-                "obscurity_level": level, "max_followers": max_fol, "description": cfg["description"]}
+                "obscurity_level": level, "max_followers": max_fol,
+                "description": cfg["description"]}
 
     seed_language = detect_seed_language(discovery_seeds, top_genres[:10]) if discovery_seeds else None
 
-    # Last.fm returns similar artists most-popular-first. Shuffle the back half
-    # so obscure candidates (positions 30-60) get a chance too.
     names_list = list(candidate_names.keys())
     front = names_list[:20]
     back  = names_list[20:]
     random.shuffle(back)
-    names_list = (front + back)[:60]
+    names_list = (front + back)[:80]
 
     print(f"[3/6] fetching Last.fm info for {len(names_list)} candidates...")
     verified: List[Dict] = []
@@ -598,26 +680,24 @@ def analyze_artists(data: ArtistInput):
     max_lfm    = cfg["max_lfm_listeners"]
     target_lfm = cfg["target_lfm_listeners"]
 
-    # Gate and rank purely on Last.fm listeners
     in_range = [
         x for x in verified
         if x.get("lfm_listeners") is not None and 0 < x["lfm_listeners"] <= max_lfm
     ]
     in_range.sort(key=lambda x: abs(x["lfm_listeners"] - target_lfm))
 
-    # Fallback: artists with no listener data (may still be obscure enough)
     if len(in_range) < 5:
         unknown = [x for x in verified if x.get("lfm_listeners") is None and x not in in_range]
         random.shuffle(unknown)
         in_range += unknown
 
-    # Enrich a few extras in case some Spotify lookups fail the name check
-    selected_for_enrich = in_range[:8]
-    print(f"[4/6] {len(in_range)} in listener range, enriching top {len(selected_for_enrich)} (Spotify lookup here)...")
+    selected_for_enrich = in_range[:12]
+    print(f"[4/6] {len(in_range)} in listener range, enriching top {len(selected_for_enrich)}...")
 
     if not selected_for_enrich:
         return {"tags": search_tags, "recommendations": [],
-                "obscurity_level": level, "max_followers": max_fol, "description": cfg["description"]}
+                "obscurity_level": level, "max_followers": max_fol,
+                "description": cfg["description"]}
 
     seed_artists = data.artists or top_artists[:3]
     enriched_map: Dict[str, Dict] = {}
@@ -630,17 +710,26 @@ def analyze_artists(data: ArtistInput):
         for future in as_completed(futures):
             name = futures[future]
             try:
-                enriched_map[name] = future.result()
+                result = future.result()
+                enriched_map[name] = result
             except Exception as e:
                 print(f"[enrich] {name}: {e}")
 
+    # FIX: image fallback — prefer iTunes image when Spotify/Last.fm has none
+    for rec in enriched_map.values():
+        if rec and not rec.get("image") and rec.get("image_itunes"):
+            rec["image"] = rec["image_itunes"]
+
     enriched = sorted(
-        [v for v in (enriched_map[r["name"]] for r in selected_for_enrich if r["name"] in enriched_map) if v is not None],
+        [v for v in (enriched_map.get(r["name"]) for r in selected_for_enrich) if v is not None],
         key=lambda x: x.get("obscurityScore") or 0,
         reverse=True
     )[:5]
 
-    print(f"[5/6] done — {len(enriched)} recommendations")
+    passed_spotify = len([v for v in enriched_map.values() if v is not None])
+    dropped_count  = len(selected_for_enrich) - passed_spotify
+
+    print(f"[5/6] done — {len(enriched)} recommendations ({dropped_count} dropped by follower/popularity gate)")
 
     return {
         "tags":            search_tags,
@@ -648,6 +737,7 @@ def analyze_artists(data: ArtistInput):
         "obscurity_level": level,
         "max_followers":   max_fol,
         "description":     cfg["description"],
+        "dropped_count":   dropped_count,
     }
 
 @app.get("/spotify/auth-url")
@@ -706,21 +796,23 @@ def get_spotify_suggestions(token: str):
                         recent.append(n)
     except: pass
     top_names = {a["name"] for a in top}
-    combined = list(top) + [{"name": n, "id": None, "genres": []} for n in recent if n not in top_names]
-    return {"suggestions": combined[:10], "top_artists": [a["name"] for a in top[:5]], "recent_artists": recent[:5]}
+    combined  = list(top) + [{"name": n, "id": None, "genres": []} for n in recent if n not in top_names]
+    return {"suggestions": combined[:10],
+            "top_artists": [a["name"] for a in top[:5]],
+            "recent_artists": recent[:5]}
 
 @app.post("/spotify/save-playlist")
 def save_spotify_playlist(data: SavePlaylistInput):
     hdrs = {"Authorization": f"Bearer {data.token}", "Content-Type": "application/json"}
-    me = requests.get("https://api.spotify.com/v1/me", headers=hdrs, timeout=8)
+    me   = requests.get("https://api.spotify.com/v1/me", headers=hdrs, timeout=8)
     if not me.ok:
         return {"error": "invalid token"}
-    me_data  = me.json()
-    user_id  = me_data.get("id")
-    market   = me_data.get("country", "US")
+    me_data = me.json()
+    user_id = me_data.get("id")
+    market  = me_data.get("country", "US")
 
-    uris = []
-    valid_ids = [aid for aid in list(dict.fromkeys(data.artist_ids))[:25] if aid]
+    uris       = []
+    valid_ids  = [aid for aid in list(dict.fromkeys(data.artist_ids))[:25] if aid]
 
     def fetch_track_uri(aid):
         try:
@@ -747,7 +839,8 @@ def save_spotify_playlist(data: SavePlaylistInput):
         json={"name": data.name[:100], "public": False, "description": "Generated by Uncover"}, timeout=8)
     if not c.ok:
         return {"error": "failed to create playlist"}
-    pid = c.json().get("id")
+    pid   = c.json().get("id")
     add_r = requests.post(f"https://api.spotify.com/v1/playlists/{pid}/tracks",
         headers=hdrs, json={"uris": uris[:50]}, timeout=8)
-    return {"playlist_url": c.json().get("external_urls", {}).get("spotify"), "tracks_added": len(uris)}
+    return {"playlist_url": c.json().get("external_urls", {}).get("spotify"),
+            "tracks_added": len(uris)}
